@@ -1,5 +1,5 @@
 ## Interface: 30405
-## Version: 1.9.1
+## Version: 1.9.2
 ## Title: Move FPS Counter
 ## Notes: Super lightweight addon that moves and remembers the default FPS counter position, type /movefps for instructions.
 ## Author: railander
