@@ -1,0 +1,9 @@
+package-as: Move_FPS_Counter
+enable-nolib-creation: no
+
+ignore:
+    - LICENSE
+    - CHANGES.txt
+    - README.md
+    - .gitignore
+    - .gitattributes
