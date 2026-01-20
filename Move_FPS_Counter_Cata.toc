@@ -1,5 +1,5 @@
 ## Interface: 40402
-## Version: 1.9.3
+## Version: @project-version@
 ## Title: Move FPS Counter
 ## Notes: Super lightweight addon that moves and remembers the default FPS counter position, type /movefps for instructions.
 ## Author: railander
