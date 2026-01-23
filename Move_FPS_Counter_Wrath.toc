@@ -3,6 +3,7 @@
 ## Title: Move FPS Counter
 ## Notes: Super lightweight addon that moves and remembers the default FPS counter position, type /movefps for instructions.
 ## Author: railander
+## IconTexture: Interface\AddOns\Move_FPS_Counter\logo.tga
 ## X-Curse-Project-ID: 789155
 ## SavedVariables: Move_FPS_Counter
 
