@@ -1,0 +1,10 @@
+CF_API_KEY.txt
+*.key
+*.pem
+*.pfx
+.env
+.env.*
+*token*
+secret*
+WoW_UI_Source/
+.codegraph/
