@@ -10,3 +10,6 @@ ignore:
     - .gitattributes
     - .github
     - tests
+    # backup: these are gitignored and untracked, never packaged either way
+    - AGENTS.md
+    - AGENTS_MEMORY.md

@@ -8,3 +8,9 @@ CF_API_KEY.txt
 secret*
 source/
 .codegraph/
+
+# agent instructions and dev suites stay strictly local: the public repo
+# holds only third-party-facing files, never agent docs or tests
+AGENTS.md
+AGENTS_MEMORY.md
+tests/
