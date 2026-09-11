@@ -3,7 +3,7 @@
     Run with: lua5.1 tests/sim_mainline.lua   (from the addon root)
 
     Replays a realistic modern session (Blizzard_FramerateFrame per
-    WoW_UI_Source/12.1) over the shared mock and suite library: config
+    source/12.1.0) over the shared mock and suite library: config
     window, drag preview, micro menu re-anchoring, the CPU/GPU-bound
     localized formats, reload persistence and /movefps reset.
 --]]

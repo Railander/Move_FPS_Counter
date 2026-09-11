@@ -6,5 +6,5 @@ CF_API_KEY.txt
 .env.*
 *token*
 secret*
-WoW_UI_Source/
+source/
 .codegraph/

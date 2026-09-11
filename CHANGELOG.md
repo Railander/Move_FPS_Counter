@@ -1,5 +1,9 @@
 # Move FPS Counter Changelog
 
+## v2.0.1
+- Fixed: on Retail the counter no longer gets stuck after reloading the UI mid-combat (or in Mythic+/rated PvP, which restrict addons even out of combat) — it now waits silently and resumes by itself once the fight is over.
+- Fixed: on Retail the FPS keybind toggle keeps working in combat instead of silently breaking after the addon loads.
+
 ## v2.0.0
 - New: `/movefps` now opens a config window. A "move counter" button makes the counter drag-movable while it is on, with a translucent green grab square over the counter; the X/Y boxes show exact coordinates with two decimal places.
 - New: an anchor picker chooses which part of the counter stays put when its width fluctuates (single-digit FPS vs triple-digit with two decimals) — the center, any of the four sides or any corner.

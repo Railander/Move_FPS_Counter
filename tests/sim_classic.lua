@@ -3,7 +3,7 @@
     Run with: lua5.1 tests/sim_classic.lua   (from the addon root)
 
     Replays a realistic classic session (FramerateLabel/FramerateText on
-    WorldFrame, per WoW_UI_Source/1.15 Blizzard_UIParent/Classic/WorldFrame)
+    WorldFrame, per source/1.15.9 Blizzard_UIParent/Classic/WorldFrame)
     over the shared mock and suite library: fresh install, config window with
     move mode, drag preview, Blizzard's throttled FPS writer, re-anchor
     storms, reload persistence, benchmark toggles and /movefps reset.

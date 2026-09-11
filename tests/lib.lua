@@ -10,7 +10,7 @@
     which would silently detach the addon from the suite's env.
 
     Provides the assert helpers, the classic/modern counter worlds (mirroring
-    WoW_UI_Source 1.15 Blizzard_UIParent/Classic/WorldFrame.xml and 12.1
+    source 1.15.9 Blizzard_UIParent/Classic/WorldFrame.xml and 12.1.0
     Blizzard_FramerateFrame, including Blizzard's throttled FPS writers and
     the full rect-read API the addon's coordinate math exercises), session
     booting, and the config-window drivers.
@@ -204,7 +204,15 @@ return {
             function frame:SetShown(b)
                 if b then self:Show(); else self:Hide(); end
             end
-            function frame:Toggle() self:SetShown(not self:IsShown()); end
+            -- models the client's Toggle->SetShown->script dispatch so the
+            -- addon's OnShow/OnHide visibility hooks observe it (the mock's
+            -- Show/Hide/SetShown primitives chain no scripts by design)
+            function frame:Toggle()
+                local willShow = not self:IsShown();
+                self:SetShown(willShow);
+                local s = self:GetScript(willShow and "OnShow" or "OnHide");
+                if s then s(self); end
+            end
             function frame:UpdatePosition(point, relativePoint, x, y)
                 self:ClearAllPoints();
                 self:SetPoint(point, _G.MicroMenuContainer, relativePoint, x, y);

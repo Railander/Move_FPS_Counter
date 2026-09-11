@@ -4,7 +4,7 @@
 
     Drives the addon over the shared mock client (../shared/wow_test_env.lua)
     through the shared suite library (tests/lib.lua: assert helpers, the
-    classic/modern counter worlds mirroring WoW_UI_Source 1.15/12.1, session
+    classic/modern counter worlds mirroring source 1.15.9/12.1.0, session
     booting, window drivers). World builders and drivers live in the lib so
     the unit suite and the two integration sims exercise identical worlds.
 --]]
@@ -20,7 +20,7 @@ local BuildClassicWorld, BuildRetailWorld = lib.BuildClassicWorld, lib.BuildReta
 -- ----------------------------------------------------------------------------
 -- Static check: every XML template the addon references must exist in the
 -- client source dumps (mocks ignore templates, so this is the only guard we
--- have). 1.15 covers the classic family, 12.1 covers modern clients.
+-- have). 1.15.9 covers the classic family, 12.1.0 covers modern clients.
 -- ----------------------------------------------------------------------------
 do
     local src = io.open("Move_FPS_Counter.lua", "r");
@@ -28,8 +28,8 @@ do
     if src then src:close(); end
     for tmpl in body and body:gmatch('"([%w]+Template)"') or function() end do
         local hit = false;
-        for _, ver in ipairs({ "1.15", "12.1" }) do
-            local p = io.popen(("grep -rl --include='*.xml' --include='*.lua' '%s' ../WoW_UI_Source/%s/Interface/AddOns 2>/dev/null | head -n 1"):format(tmpl, ver));
+        for _, ver in ipairs({ "1.15.9", "12.1.0" }) do
+            local p = io.popen(("grep -rl --include='*.xml' --include='*.lua' '%s' ../source/%s/Interface/AddOns 2>/dev/null | head -n 1"):format(tmpl, ver));
             local line = p and p:read("*l");
             if p then p:close(); end
             if line then hit = true; break; end

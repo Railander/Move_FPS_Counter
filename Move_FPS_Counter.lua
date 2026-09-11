@@ -9,6 +9,15 @@
 -- driven: no polling and no per-frame code. /movefps opens the config window
 -- (with a move mode that makes the counter drag-movable), /movefps reset
 -- restores the defaults.
+--
+-- Midnight (12.x) restriction discipline, retail flavor only: while any addon
+-- restriction is active (Combat/Encounter/ChallengeMode/PvPMatch/Map/Chat --
+-- rated PvP and Mythic+ hold them out of combat, so the combat flag alone is
+-- the wrong check) every gated call (SetPoint/SetSize, SetScript/HookScript,
+-- RegisterEvent, SetFont, Toggle's SetShown, ...) silently refuses or queues
+-- instead of attempting, active drags cancel, and a /reload landing
+-- mid-protection defers all gated setup until the lift is confirmed
+-- out-of-dispatch. Classic flavors have no gate system and run unguarded.
 
 local ADDON_NAME = "Move_FPS_Counter";
 
@@ -60,6 +69,29 @@ local counterTouchedWhileOpen; -- the player toggled visibility while configurin
 local MoveFPS_grabDX, MoveFPS_grabDY; -- cursor offset from the anchor point at grab time
 local MoveFPS_CounterShown;   -- assigned below (used by the toggle hook)
 local MoveFPS_SetCounterShown; -- assigned below
+
+-- Restriction state (Midnight 12.x, retail flavor only). Declared HERE, above
+-- every function that reads or writes them: Lua upvalues bind at closure
+-- creation, so a later `local` would leave earlier paths writing to a
+-- same-named global instead. Classic flavors never lock (no gate system --
+-- the queries below always read false there), so one code path serves all.
+local MoveFPS_restrictionsActive = false;
+local MoveFPS_restrictedTypes = {}; -- per-type marks from ADDON_RESTRICTION_STATE_CHANGED payloads
+local MoveFPS_gatedInitDeferred = false;
+local MoveFPS_stateLoaded = false; -- flavor resolved + db backfilled (pure Lua, safe anytime)
+local MoveFPS_initDone = false;    -- gated apply finished (position/size/restore/hooks/options)
+local MoveFPS_pendingApply = false; -- gated position/size work skipped while locked
+local MoveFPS_pendingMeasure = false; -- + the game-placement measure (reset case)
+local MoveFPS_pendingGreet = false; -- first-run tutorial skipped while locked (chat is best-effort)
+local MoveFPS_dragActive = false;  -- a drag gesture is in flight (OnUpdate early-returns without it)
+local MoveFPS_quietVisibility = false; -- programmatic Show/Hide: don't track as a user toggle
+local MoveFPS_visibilityHooked = false;
+-- Forward declarations: assigned further below, called from early restriction
+-- paths and mid-file widget closures (bound here so they resolve correctly).
+local MoveFPS_EnsureGatedInit;
+local MoveFPS_FlushPending;
+local MoveFPS_RegisterAddonEvents;
+local MoveFPS_EventFrame; -- listener frame, created at file load below
 
 local MIN_SIZE, MAX_SIZE = 1, 64;
 local gameDefaultSize = 12; -- the game's own counter font size, captured at login
@@ -138,6 +170,122 @@ local function MoveFPS_Sanitize(dbt)
 	dbt.win.y = MoveFPS_Round2(tonumber(dbt.win.y) or 0);
 end
 
+-- ----------------------------------------------------------------------------
+-- Restriction state (Midnight 12.x): lock taint-able work while protected
+-- ----------------------------------------------------------------------------
+-- Six restriction types (Enum.AddOnRestrictionType, identical in every dump):
+-- Combat, Encounter, ChallengeMode (M+), PvPMatch, Map, Chat. While ANY type
+-- is active, gated calls from addon execution fail silently -- so while
+-- locked this addon refuses or queues instead of attempting: drags refuse,
+-- position/size/anchor/window writes update the db (pure Lua, safe) and queue
+-- the apply for the lift, active drags cancel, chat notices never emit (they
+-- neither render while protected nor get read in combat -- blocked input just
+-- does nothing). Safe while locked and never guarded: Show/Hide,
+-- GetCursorPosition, rect reads, GetFont, FontString SetText/SetFormattedText
+-- (AllowedWhenTainted), db table work.
+local MoveFPS_RESTRICTION_FALLBACK = { 0, 1, 2, 3, 4, 5 }; -- Combat..Chat
+local MoveFPS_RESTRICTION_STATE = { inactive = 0, activating = 1, active = 2 };
+
+local function MoveFPS_RestrictionTypeIDs()
+	if Enum and Enum.AddOnRestrictionType then
+		local t = Enum.AddOnRestrictionType;
+		local out = {};
+		for _, id in ipairs({ t.Combat, t.Encounter, t.ChallengeMode, t.PvPMatch, t.Map, t.Chat }) do
+			if id ~= nil then
+				out[#out + 1] = id;
+			end
+		end
+		if #out > 0 then
+			return out;
+		end
+	end
+	return MoveFPS_RESTRICTION_FALLBACK;
+end
+
+local function MoveFPS_RestrictionStateID(name)
+	if Enum and Enum.AddOnRestrictionState and Enum.AddOnRestrictionState[name] ~= nil then
+		return Enum.AddOnRestrictionState[name];
+	end
+	return MoveFPS_RESTRICTION_STATE[name];
+end
+
+-- Full all-types query. Must NEVER run during ADDON_RESTRICTION_STATE_CHANGED
+-- dispatch (IsAddOnRestrictionActive reads false there by design); that
+-- handler maintains per-type marks from the payload instead.
+local function MoveFPS_AreRestrictionsActive()
+	if C_RestrictedActions and C_RestrictedActions.IsAddOnRestrictionActive then
+		for _, rtype in ipairs(MoveFPS_RestrictionTypeIDs()) do
+			local ok, active = pcall(C_RestrictedActions.IsAddOnRestrictionActive, rtype);
+			if ok and active then
+				return true;
+			end
+		end
+		return false;
+	end
+	if InCombatLockdown then
+		return InCombatLockdown() and true or false;
+	end
+	return false;
+end
+
+-- Live check: the latched flag covers dispatch windows where the query reads
+-- false by design; the query covers events missed while a registration was
+-- down. Either side locks. Callers are input/event-driven (never per-frame).
+local function MoveFPS_IsInteractionLocked()
+	return MoveFPS_restrictionsActive or MoveFPS_AreRestrictionsActive();
+end
+
+-- Cancel an in-flight drag without touching a gate: the flag stops the
+-- OnUpdate (hidden frames tick nothing anyway), Hide is ungated, and the
+-- script detach is best-effort -- while locked it stays as a nil-cost
+-- early-return until the next unrestricted stop or lift detaches it.
+local function MoveFPS_CancelDrag()
+	MoveFPS_dragActive = false;
+	if dragProxy then
+		dragProxy:Hide();
+		if dragProxy.square then
+			dragProxy.square:Hide();
+		end
+		if not MoveFPS_IsInteractionLocked() then
+			dragProxy:SetScript("OnUpdate", nil);
+		end
+	end
+end
+
+local function MoveFPS_ApplyRestrictionsActive()
+	MoveFPS_restrictionsActive = true;
+	MoveFPS_CancelDrag();
+end
+
+local function MoveFPS_ApplyRestrictionsCleared()
+	MoveFPS_restrictionsActive = false;
+	for k in pairs(MoveFPS_restrictedTypes) do
+		MoveFPS_restrictedTypes[k] = nil;
+	end
+	MoveFPS_EnsureGatedInit();
+end
+
+-- Re-query outside event dispatch; clears the lock only when every type is idle.
+local function MoveFPS_ConfirmRestrictionsCleared()
+	if not MoveFPS_AreRestrictionsActive() then
+		MoveFPS_ApplyRestrictionsCleared();
+	end
+end
+
+-- Re-query and apply whichever side is true. Both sides are silent. The clear
+-- side is cheap when there is nothing to resume: only a lock episode, a
+-- deferred init, queued work, or a never-finished init runs the full resume.
+local function MoveFPS_RefreshRestrictionState()
+	if MoveFPS_AreRestrictionsActive() then
+		MoveFPS_ApplyRestrictionsActive();
+		return true;
+	end
+	if MoveFPS_restrictionsActive or MoveFPS_gatedInitDeferred or MoveFPS_pendingApply or not MoveFPS_initDone then
+		MoveFPS_ApplyRestrictionsCleared();
+	end
+	return false;
+end
+
 -- While locked, the region's own anchor methods are no-ops so nothing can
 -- move the counter behind our back; unlocked (never placed), it behaves
 -- exactly like the stock game.
@@ -201,6 +349,9 @@ local function MoveFPS_OnToggled()
 	if not db then
 		return;
 	end
+	if MoveFPS_quietVisibility then
+		return; -- our own preview force-show/restore, never the player's state
+	end
 	if db.remember then
 		-- store what the toggle actually did (never a blind flip: the config
 		-- window's preview force-show would desync a flip counter)
@@ -213,7 +364,7 @@ local function MoveFPS_OnToggled()
 end
 
 -- ----------------------------------------------------------------------------
--- config window, built at load time inside a pcall: even if a widget template
+-- config window, built on gated init inside a pcall: even if a widget template
 -- is missing in some client flavor, the counter keeps working
 -- ----------------------------------------------------------------------------
 MoveFPS_CounterShown = function()
@@ -224,6 +375,8 @@ MoveFPS_CounterShown = function()
 end
 
 MoveFPS_SetCounterShown = function(shown)
+	-- Show/Hide carry no gate annotation and stay usable while protected;
+	-- callers that must not count as a user toggle wrap this in the quiet flag.
 	if MoveFPS_frame then
 		if shown then MoveFPS_frame:Show(); else MoveFPS_frame:Hide(); end
 		return;
@@ -305,6 +458,15 @@ local function MoveFPS_DragUpdate()
 	if not db then
 		return;
 	end
+	if not MoveFPS_dragActive then
+		return; -- idle frame: return before the lock query (nil per-frame cost)
+	end
+	if MoveFPS_IsInteractionLocked() then
+		-- protection landed mid-drag: visuals are cleaned up, the gesture is
+		-- dropped without persisting anything (db keeps the pre-drag spot).
+		MoveFPS_CancelDrag();
+		return;
+	end
 	local pw, ph = UIParent:GetSize();
 	local cx, cy = GetCursorPosition(); -- already in UI units on this client
 	db.x = MoveFPS_Round2(cx - MoveFPS_grabDX - pw / 2);
@@ -377,6 +539,9 @@ local function MoveFPS_BuildDragProxy()
 	if dragProxy then
 		return;
 	end
+	if MoveFPS_IsInteractionLocked() then
+		return; -- no taint-able installs (texture/input/scripts) while protected
+	end
 	-- The green move-mode square must render BELOW the counter's text while
 	-- still receiving the drag, so it is a BACKGROUND-layer texture inside
 	-- the counter's own frame hierarchy (a frame's background layer draws
@@ -408,6 +573,12 @@ local function MoveFPS_BuildDragProxy()
 	-- square is ONLY ever counter-anchored and the counter is ONLY ever
 	-- cursor-driven, so there is a single control loop with nothing to fight.
 	dragProxy:SetScript("OnDragStart", function(self)
+		if not db then
+			return;
+		end
+		if MoveFPS_IsInteractionLocked() then
+			return; -- silently refuse: blocked input just does nothing
+		end
 		-- capture where the cursor grabbed the square relative to the counter's
 		-- anchor point. A placed counter needs no measuring at all: db already
 		-- IS the anchor point's position in UI units, so the grab is exact and
@@ -425,11 +596,23 @@ local function MoveFPS_BuildDragProxy()
 		end
 		MoveFPS_grabDX = cx - ax;
 		MoveFPS_grabDY = cy - ay;
+		MoveFPS_dragActive = true;
 		self:SetScript("OnUpdate", function() MoveFPS_DragUpdate(); end);
 	end);
 	dragProxy:SetScript("OnDragStop", function(self)
+		if MoveFPS_IsInteractionLocked() then
+			-- hide only: the final apply and the detach need gates, so the
+			-- script stays as a nil-cost early-return until unrestricted.
+			MoveFPS_dragActive = false;
+			self:Hide();
+			if self.square then
+				self.square:Hide();
+			end
+			return;
+		end
+		MoveFPS_DragUpdate(); -- exact final position (drag still active)
+		MoveFPS_dragActive = false;
 		self:SetScript("OnUpdate", nil);
-		MoveFPS_DragUpdate(); -- exact final position
 		if RefreshWindow then
 			RefreshWindow();
 		end
@@ -448,9 +631,15 @@ local function MoveFPS_BuildOptionsWindow()
 	options:RegisterForDrag("LeftButton");
 	options:SetClampedToScreen(true);
 	options:SetScript("OnDragStart", function(self)
+		if MoveFPS_IsInteractionLocked() then
+			return; -- StartMoving is gated: the window stays put while protected
+		end
 		self:StartMoving();
 	end);
 	options:SetScript("OnDragStop", function(self)
+		if MoveFPS_IsInteractionLocked() then
+			return; -- StopMovingOrSizing + re-anchor are gated; position unsaved
+		end
 		self:StopMovingOrSizing();
 		if db then
 			local pw, ph = UIParent:GetSize();
@@ -504,6 +693,16 @@ local function MoveFPS_BuildOptionsWindow()
 	options.moveBtn:SetText("move counter");
 	options.moveBtn:SetPoint("TOP", options, "TOP", 0, -6);
 	options.moveBtn:SetScript("OnClick", function()
+		if MoveFPS_IsInteractionLocked() then
+			-- move mode needs gated installs/anchors: leave it off while locked.
+			if dragProxy then
+				dragProxy:Hide();
+				if dragProxy.square then
+					dragProxy.square:Hide();
+				end
+			end
+			return;
+		end
 		if dragProxy and dragProxy:IsShown() then
 			dragProxy:Hide();
 			dragProxy.square:Hide();
@@ -523,6 +722,10 @@ local function MoveFPS_BuildOptionsWindow()
 		v = tonumber(v);
 		if v and MoveFPS_ValidCoord(v) then
 			db.x, db.placed = MoveFPS_Round2(v), true;
+			if MoveFPS_IsInteractionLocked() then
+				MoveFPS_pendingApply = true; -- db kept, apply on lift
+				return;
+			end
 			MoveFPS_SetLocked(true);
 			MoveFPS_ApplyPosition();
 		end
@@ -532,6 +735,10 @@ local function MoveFPS_BuildOptionsWindow()
 		v = tonumber(v);
 		if v and MoveFPS_ValidCoord(v) then
 			db.y, db.placed = MoveFPS_Round2(v), true;
+			if MoveFPS_IsInteractionLocked() then
+				MoveFPS_pendingApply = true;
+				return;
+			end
 			MoveFPS_SetLocked(true);
 			MoveFPS_ApplyPosition();
 		end
@@ -547,6 +754,10 @@ local function MoveFPS_BuildOptionsWindow()
 		v = tonumber(v);
 		if v and MoveFPS_ValidSize(v) then
 			db.size = MoveFPS_Round1(v);
+			if MoveFPS_IsInteractionLocked() then
+				MoveFPS_pendingApply = true; -- SetFont is gated
+				return;
+			end
 			MoveFPS_ApplySize();
 		end
 	end);
@@ -606,9 +817,17 @@ local function MoveFPS_BuildOptionsWindow()
 		counterShownSnapshot = MoveFPS_CounterShown();
 		counterTouchedWhileOpen = false;
 		if not counterShownSnapshot then
-			MoveFPS_SetCounterShown(true); -- live preview while configuring
+			-- live preview while configuring; quiet so the visibility hooks
+			-- (retail) do not mistake it for the player's own toggle
+			MoveFPS_quietVisibility = true;
+			MoveFPS_SetCounterShown(true);
+			MoveFPS_quietVisibility = false;
 		end
-		options.moveBtn:SetText("move counter");
+		-- Button:SetText is gated: refresh the label only when clear (cosmetic;
+		-- RefreshWindow re-syncs it on lift)
+		if not MoveFPS_IsInteractionLocked() then
+			options.moveBtn:SetText("move counter");
+		end
 		if RefreshWindow then
 			RefreshWindow();
 		end
@@ -616,12 +835,20 @@ local function MoveFPS_BuildOptionsWindow()
 	options:SetScript("OnHide", function()
 		if dragProxy then
 			dragProxy:Hide(); -- leaving the window also leaves move mode
-			dragProxy.square:Hide();
+			if dragProxy.square then
+				dragProxy.square:Hide();
+			end
+		end
+		MoveFPS_dragActive = false;
+		if dragProxy and not MoveFPS_IsInteractionLocked() then
+			dragProxy:SetScript("OnUpdate", nil); -- detach when allowed
 		end
 		-- undo our preview force-show, but never a visibility change the
 		-- player made themselves while the window was open
 		if counterShownSnapshot ~= nil and not counterShownSnapshot and not counterTouchedWhileOpen then
+			MoveFPS_quietVisibility = true;
 			MoveFPS_SetCounterShown(false);
+			MoveFPS_quietVisibility = false;
 		end
 		counterShownSnapshot = nil;
 	end);
@@ -629,6 +856,9 @@ local function MoveFPS_BuildOptionsWindow()
 	function RefreshWindow()
 		if not db or not options.xBox then
 			return;
+		end
+		if MoveFPS_IsInteractionLocked() then
+			return; -- EditBox/slider/check writes are gated: refresh on lift
 		end
 		if tonumber(options.xBox:GetText()) ~= db.x then
 			options.xBox:SetText(string.format("%.2f", db.x));
@@ -689,8 +919,13 @@ local function MoveFPS_BuildAnchorDropdown()
 				end,
 				function(data)
 					db.anchor = data;
-					MoveFPS_ApplyPosition();
-					options.anchorBtn:SetText(data);
+					if MoveFPS_IsInteractionLocked() then
+						MoveFPS_pendingApply = true;
+					else
+						MoveFPS_ApplyPosition();
+						-- Button:SetText is gated: label re-syncs via RefreshWindow on lift
+						options.anchorBtn:SetText(data);
+					end
 				end,
 				a
 			);
@@ -711,118 +946,194 @@ local function MoveFPS_BuildAnchorFallback()
 				break;
 			end
 		end
-		MoveFPS_ApplyPosition();
-		options.anchorBtn:SetText(db.anchor);
+		if MoveFPS_IsInteractionLocked() then
+			MoveFPS_pendingApply = true;
+		else
+			MoveFPS_ApplyPosition();
+			-- Button:SetText is gated: label re-syncs via RefreshWindow on lift
+			options.anchorBtn:SetText(db.anchor);
+		end
 	end);
 end
 
-pcall(function()
-	MoveFPS_EnsureMenuUtil();
-	MoveFPS_BuildOptionsWindow();
-end);
-pcall(MoveFPS_BuildAnchorDropdown);
-if options and not options.anchorBtn then
-	pcall(MoveFPS_BuildAnchorFallback);
-end
-
 -- ----------------------------------------------------------------------------
--- login and persist through sessions functionality
+-- Load (pure Lua, safe anytime) vs gated init (deferred while protected)
 -- ----------------------------------------------------------------------------
-local function MoveFPS_OnEvent(self, event, arg1)
-	if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
-		self:UnregisterEvent("ADDON_LOADED");
 
-		-- resolve the client flavor first: on an unknown layout stay inert
-		-- before touching saved variables
-		if FramerateFrame then
-			-- modern clients: one frame holds both fontstrings
-			MoveFPS_frame = FramerateFrame;
-			MoveFPS_text = FramerateFrame.FramerateText;
-			MoveFPS_label = FramerateFrame.Label;
-			MoveFPS_regions[1] = FramerateFrame;
-			MoveFPS_toggle = function() FramerateFrame:Toggle(); end;
-		elseif FramerateLabel and FramerateText then
-			-- classic clients: two fontstrings on WorldFrame
-			MoveFPS_label = FramerateLabel;
-			MoveFPS_text = FramerateText;
-			MoveFPS_regions[1] = FramerateLabel;
-			MoveFPS_regions[2] = FramerateText;
-			MoveFPS_toggle = function() ToggleFramerate(); end;
+-- Resolve the flavor, load and backfill the db, capture Blizzard's methods,
+-- anchors and font size. Pure Lua and plain reads only: safe under any
+-- restriction, so a /reload-in-combat still lands its state and only the
+-- gated apply waits for the lift. Returns false on an unknown layout --
+-- inert before touching SavedVariables. Idempotent.
+local function MoveFPS_LoadState()
+	if MoveFPS_stateLoaded then
+		return true;
+	end
+	-- resolve the client flavor first: on an unknown layout stay inert
+	-- before touching saved variables
+	if FramerateFrame then
+		-- modern clients: one frame holds both fontstrings
+		MoveFPS_frame = FramerateFrame;
+		MoveFPS_text = FramerateFrame.FramerateText;
+		MoveFPS_label = FramerateFrame.Label;
+		MoveFPS_regions[1] = FramerateFrame;
+		MoveFPS_toggle = function() FramerateFrame:Toggle(); end;
+	elseif FramerateLabel and FramerateText then
+		-- classic clients: two fontstrings on WorldFrame
+		MoveFPS_label = FramerateLabel;
+		MoveFPS_text = FramerateText;
+		MoveFPS_regions[1] = FramerateLabel;
+		MoveFPS_regions[2] = FramerateText;
+		MoveFPS_toggle = function() ToggleFramerate(); end;
+	else
+		return false;
+	end
+
+	local freshDB = _G[ADDON_NAME] == nil;
+	db = _G[ADDON_NAME];
+	if not db then
+		db = {};
+		_G[ADDON_NAME] = db; -- first session: publish it so it gets saved
+	end
+
+	-- capture Blizzard's methods, anchors and font size (plain reads)
+	for _, region in ipairs(MoveFPS_regions) do
+		local orig = {
+			clear = region.ClearAllPoints,
+			setPoint = region.SetPoint,
+		};
+		local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, 1);
+		if ok then
+			orig.points = { point = point, relativeTo = relativeTo, relativePoint = relativePoint, x = x, y = y };
+		end
+		if region.GetFont then
+			local _, fontSize = region:GetFont();
+			orig.size = fontSize;
+		end
+		MoveFPS_orig[region] = orig;
+	end
+	-- the label and number fontstrings also need their game-default font
+	-- size remembered (they are not anchored by us on modern clients)
+	for _, region in ipairs({ MoveFPS_label, MoveFPS_text }) do
+		if region and not MoveFPS_orig[region] and region.GetFont then
+			local _, fontSize = region:GetFont();
+			MoveFPS_orig[region] = { size = fontSize };
+		end
+	end
+	local labelOrig = MoveFPS_orig[MoveFPS_label] or MoveFPS_orig[MoveFPS_text] or {};
+	if labelOrig.size then
+		gameDefaultSize = labelOrig.size; -- the size the game UI actually uses
+	end
+
+	local upgraded = MoveFPS_BackfillLegacy(db);
+	MergeDefaults(db, defaults);
+	MoveFPS_Sanitize(db);
+	if freshDB or upgraded then
+		if MoveFPS_IsInteractionLocked() then
+			MoveFPS_pendingGreet = true; -- chat is best-effort: greet on lift
 		else
-			return;
-		end
-
-		local freshDB = _G[ADDON_NAME] == nil;
-		db = _G[ADDON_NAME];
-		if not db then
-			db = {};
-			_G[ADDON_NAME] = db; -- first session: publish it so it gets saved
-		end
-
-		-- capture Blizzard's methods, anchors and font size
-		for _, region in ipairs(MoveFPS_regions) do
-			local orig = {
-				clear = region.ClearAllPoints,
-				setPoint = region.SetPoint,
-			};
-			local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, 1);
-			if ok then
-				orig.points = { point = point, relativeTo = relativeTo, relativePoint = relativePoint, x = x, y = y };
-			end
-			if region.GetFont then
-				local _, fontSize = region:GetFont();
-				orig.size = fontSize;
-			end
-			MoveFPS_orig[region] = orig;
-		end
-		-- the label and number fontstrings also need their game-default font
-		-- size remembered (they are not anchored by us on modern clients)
-		for _, region in ipairs({ MoveFPS_label, MoveFPS_text }) do
-			if region and not MoveFPS_orig[region] and region.GetFont then
-				local _, fontSize = region:GetFont();
-				MoveFPS_orig[region] = { size = fontSize };
-			end
-		end
-		local labelOrig = MoveFPS_orig[MoveFPS_label] or MoveFPS_orig[MoveFPS_text] or {};
-		if labelOrig.size then
-			gameDefaultSize = labelOrig.size; -- the size the game UI actually uses
-		end
-
-		if freshDB or MoveFPS_BackfillLegacy(db) then
 			MoveFPS_instructions(); -- first generation, or a v1 table upgrading
 		end
-		MergeDefaults(db, defaults);
-		MoveFPS_Sanitize(db);
+	end
+
+	-- rewrite the decimals in whatever format Blizzard feeds the counter
+	-- (default 1 passes the format through untouched). Plain assignment: safe.
+	if MoveFPS_text then
+		local origSetFormattedText = MoveFPS_text.SetFormattedText;
+		MoveFPS_text.SetFormattedText = function(self, format, ...)
+			if db.decimals ~= 1 then
+				format = string.gsub(format, "%%%.%df", "%%." .. db.decimals .. "f");
+			end
+			return origSetFormattedText(self, format, ...);
+		end;
+	end
+	MoveFPS_stateLoaded = true;
+	return true;
+end
+
+-- Flush work queued while locked. Runs only when clear; pending position
+-- work also waits for the gated init to have finished (it covers the apply).
+MoveFPS_FlushPending = function()
+	if not MoveFPS_stateLoaded or MoveFPS_IsInteractionLocked() then
+		return;
+	end
+	if MoveFPS_pendingGreet then
+		MoveFPS_pendingGreet = false;
+		MoveFPS_instructions();
+	end
+	if not MoveFPS_pendingApply or not MoveFPS_initDone then
+		return;
+	end
+	MoveFPS_pendingApply = false;
+	if MoveFPS_pendingMeasure then
+		-- reset case: hand the anchors back first, then measure the game's own
+		MoveFPS_pendingMeasure = false;
+		MoveFPS_ApplyPosition();
+		MoveFPS_StoreGamePlacement();
+	else
+		MoveFPS_ApplyPosition();
+	end
+	MoveFPS_ApplySize();
+	if options then
+		options:ClearAllPoints();
+		options:SetPoint("CENTER", UIParent, "CENTER", db.win.x, db.win.y);
+		if RefreshWindow then
+			RefreshWindow();
+		end
+	end
+end;
+
+-- Idempotent gated setup: (re)registers events, builds the options window,
+-- and runs the deferred login apply. Safe to call from any event or slash
+-- entry; defers (and remembers) while protected so a /reload-in-combat never
+-- half-installs silently. On classic flavors the lock never engages, so this
+-- runs straight through exactly like the old load path.
+MoveFPS_EnsureGatedInit = function()
+	if MoveFPS_IsInteractionLocked() then
+		MoveFPS_gatedInitDeferred = true;
+		return false;
+	end
+	MoveFPS_gatedInitDeferred = false;
+	MoveFPS_RegisterAddonEvents();
+	if not options then
+		pcall(function()
+			MoveFPS_EnsureMenuUtil();
+			MoveFPS_BuildOptionsWindow();
+		end);
+	end
+	if options and not options.anchorBtn then
+		pcall(MoveFPS_BuildAnchorDropdown);
+		if not options.anchorBtn then
+			pcall(MoveFPS_BuildAnchorFallback);
+		end
+	end
+	if MoveFPS_stateLoaded and not MoveFPS_initDone then
 		if not db.placed then
 			MoveFPS_StoreGamePlacement();
 		end
-
-		-- rewrite the decimals in whatever format Blizzard feeds the counter
-		-- (default 1 passes the format through untouched)
-		if MoveFPS_text then
-			local origSetFormattedText = MoveFPS_text.SetFormattedText;
-			MoveFPS_text.SetFormattedText = function(self, format, ...)
-				if db.decimals ~= 1 then
-					format = string.gsub(format, "%%%.%df", "%%." .. db.decimals .. "f");
-				end
-				return origSetFormattedText(self, format, ...);
-			end;
-		end
-
 		if db.placed then
 			MoveFPS_SetLocked(true);
 		end
 		MoveFPS_ApplyPosition();
 		MoveFPS_ApplySize();
 		-- restore the visibility BEFORE hooking the toggle so our own restore
-		-- does not count as a user toggle
+		-- does not count as a user toggle (hooks install right after)
 		if db.remember and db.toggle then
 			MoveFPS_toggle();
 		end
-		if MoveFPS_frame then
-			hooksecurefunc(MoveFPS_frame, "Toggle", MoveFPS_OnToggled);
-		else
-			hooksecurefunc("ToggleFramerate", MoveFPS_OnToggled);
+		if not MoveFPS_visibilityHooked then
+			if MoveFPS_frame then
+				-- retail: post-hooks on Show/Hide. NEVER hooksecurefunc the
+				-- frame's Toggle: it is a Blizzard Lua method whose body
+				-- calls the gated SetShown, and tainting it would break the
+				-- player's own keybind toggle while protected.
+				MoveFPS_frame:HookScript("OnShow", MoveFPS_OnToggled);
+				MoveFPS_frame:HookScript("OnHide", MoveFPS_OnToggled);
+			else
+				-- classic: no gate system; the global hook is inert and safe
+				hooksecurefunc("ToggleFramerate", MoveFPS_OnToggled);
+			end
+			MoveFPS_visibilityHooked = true;
 		end
 		if options then
 			options:ClearAllPoints();
@@ -831,17 +1142,98 @@ local function MoveFPS_OnEvent(self, event, arg1)
 				RefreshWindow();
 			end
 		end
+		MoveFPS_initDone = true;
+	end
+	MoveFPS_FlushPending();
+	return true;
+end;
+
+-- ----------------------------------------------------------------------------
+-- login and persist through sessions functionality
+-- ----------------------------------------------------------------------------
+local function MoveFPS_OnEvent(self, event, arg1, arg2)
+	if event == "ADDON_LOADED" then
+		if arg1 == ADDON_NAME then
+			-- UnregisterEvent is itself gated: skip while locked (the
+			-- handler is idempotent, a lingering registration is harmless).
+			if not MoveFPS_IsInteractionLocked() then
+				self:UnregisterEvent("ADDON_LOADED");
+			end
+			if MoveFPS_LoadState() then
+				MoveFPS_EnsureGatedInit();
+			end
+		end
+	elseif event == "ADDON_RESTRICTION_STATE_CHANGED" then
+		-- Payload is (restrictionType, newState). IsAddOnRestrictionActive
+		-- reads FALSE during this dispatch by design, so never query here --
+		-- maintain per-type marks from the payload and confirm outside.
+		if arg2 == MoveFPS_RestrictionStateID("inactive") then
+			if arg1 ~= nil then MoveFPS_restrictedTypes[arg1] = nil; end
+			if next(MoveFPS_restrictedTypes) == nil then
+				if C_Timer and C_Timer.After then
+					C_Timer.After(0, MoveFPS_ConfirmRestrictionsCleared);
+				end
+			end
+		else
+			-- Activating (fired before enforcement starts), Active, or unknown.
+			if arg1 ~= nil then MoveFPS_restrictedTypes[arg1] = true; end
+			MoveFPS_ApplyRestrictionsActive();
+		end
+	elseif event == "PLAYER_REGEN_DISABLED" then
+		-- Entering combat: cancel drags immediately; mark locked only if the
+		-- query agrees. The lock transition is silent by design.
+		MoveFPS_CancelDrag();
+		if MoveFPS_AreRestrictionsActive() then
+			MoveFPS_ApplyRestrictionsActive();
+		end
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		-- Backstop wake-up: covers a restriction-changed registration missed
+		-- during a /reload-in-combat.
+		MoveFPS_RefreshRestrictionState();
+	elseif event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED" or event == "ZONE_CHANGED_NEW_AREA" then
+		-- Zone crossings (M+/rated maps restrict on entry, out of combat):
+		-- re-check protected status, flush queued work on lift.
+		MoveFPS_RefreshRestrictionState();
 	end
 end
 
-local MoveFPS = CreateFrame("Frame");
-MoveFPS:RegisterEvent("ADDON_LOADED");
-MoveFPS:SetScript("OnEvent", MoveFPS_OnEvent);
+-- All event installs funnel through here so a deferred boot can retry them
+-- idempotently once protection lifts. Re-registering is a no-op and the
+-- script is simply replaced.
+local function MoveFPS_RegisterAddonEventsInner()
+	if not MoveFPS_EventFrame then return end
+	MoveFPS_EventFrame:RegisterEvent("ADDON_LOADED");
+	MoveFPS_EventFrame:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED");
+	MoveFPS_EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED");
+	MoveFPS_EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED");
+	MoveFPS_EventFrame:RegisterEvent("PLAYER_ENTERING_WORLD");
+	MoveFPS_EventFrame:RegisterEvent("ZONE_CHANGED");
+	MoveFPS_EventFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA");
+	MoveFPS_EventFrame:SetScript("OnEvent", MoveFPS_OnEvent);
+end
+MoveFPS_RegisterAddonEvents = MoveFPS_RegisterAddonEventsInner;
+
+MoveFPS_EventFrame = CreateFrame("Frame", "Move_FPS_CounterEventFrame");
+MoveFPS_RegisterAddonEvents();
+
+-- Boot-time restriction evaluation: a /reload landing mid-protection
+-- silently defers all gated setup instead of half-installing. Recovery order
+-- on lift: restriction-changed confirm, regen-enabled, zone re-check, next
+-- slash/window use (lazy self-heal in the slash handler below).
+MoveFPS_EnsureGatedInit();
 
 -- slash command functionality: bare /movefps (or anything unrecognized)
 -- toggles the config window, /movefps reset restores every default
 SLASH_MOVEFPS1 = "/movefps";
 SlashCmdList.MOVEFPS = function(msg)
+	if not MoveFPS_stateLoaded then
+		if not MoveFPS_LoadState() then
+			return; -- unknown layout: inert, SavedVariables untouched
+		end
+	end
+	-- self-heal: a missed ADDON_LOADED (deaf boot under protection) resumes
+	-- here once clear; no-op while locked.
+	MoveFPS_EnsureGatedInit();
 	if not db then
 		return;
 	end
@@ -851,14 +1243,24 @@ SlashCmdList.MOVEFPS = function(msg)
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize; -- the game's own size, never a 0 sentinel
 		MoveFPS_SetLocked(false);
-		MoveFPS_ApplyPosition();
-		MoveFPS_ApplySize();
-		MoveFPS_StoreGamePlacement();
+		if not MoveFPS_initDone or MoveFPS_IsInteractionLocked() then
+			-- hand the anchors back and measure on lift; db already correct
+			MoveFPS_pendingApply = true;
+			MoveFPS_pendingMeasure = true;
+		else
+			MoveFPS_ApplyPosition();
+			MoveFPS_ApplySize();
+			MoveFPS_StoreGamePlacement();
+		end
 		if options then
-			options:ClearAllPoints();
-			options:SetPoint("CENTER", UIParent, "CENTER", db.win.x, db.win.y);
-			if RefreshWindow then
-				RefreshWindow();
+			if MoveFPS_IsInteractionLocked() then
+				MoveFPS_pendingApply = true;
+			else
+				options:ClearAllPoints();
+				options:SetPoint("CENTER", UIParent, "CENTER", db.win.x, db.win.y);
+				if RefreshWindow then
+					RefreshWindow();
+				end
 			end
 		end
 	elseif options and options:IsShown() then
