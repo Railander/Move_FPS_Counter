@@ -3,6 +3,9 @@ enable-nolib-creation: no
 
 manual-changelog: CHANGELOG.md
 
+# EXCLUSIONARY MINDSET (house rule -- see ../AGENTS.md): only .lua + .toc +
+# CHANGELOG.md + logo.tga may ship. The packager archives tracked files at
+# the tag, so every other tracked file must be listed below.
 ignore:
     - LICENSE
     - README.md
@@ -10,6 +13,9 @@ ignore:
     - .gitattributes
     - .github
     - tests
+    # backup: gitignored and untracked, never packaged either way
+    - AGENTS.md
+    - AGENTS_MEMORY.md
     # backup: these are gitignored and untracked, never packaged either way
     - AGENTS.md
     - AGENTS_MEMORY.md

@@ -9,8 +9,27 @@ secret*
 source/
 .codegraph/
 
-# agent instructions and dev suites stay strictly local: the public repo
-# holds only third-party-facing files, never agent docs or tests
+# EXCLUSIONARY BY DEFAULT (house rule -- see ../AGENTS.md): everything is
+# ignored unless explicitly allowed below. A new file that isn't allowlisted
+# stays invisible to `git status` and can never reach the public repo or the
+# CurseForge zip by accident (the packager archives tracked files at the tag
+# -- untracked files never reach the runner). To track a new game file,
+# allowlist it here FIRST, then `git add` it.
+*
+!*/
+
+# explicitly allowed: game files, player docs, release infra
+!.gitignore
+!.pkgmeta
+!*.lua
+!*.toc
+!CHANGELOG.md
+!README.md
+!LICENSE
+!logo.tga
+!/.github/workflows/release.yml
+
+# local-only, never tracked even though the allowlist above would permit them
 AGENTS.md
 AGENTS_MEMORY.md
 tests/
