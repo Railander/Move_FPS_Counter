@@ -16,6 +16,3 @@ ignore:
     # backup: gitignored and untracked, never packaged either way
     - AGENTS.md
     - AGENTS_MEMORY.md
-    # backup: these are gitignored and untracked, never packaged either way
-    - AGENTS.md
-    - AGENTS_MEMORY.md

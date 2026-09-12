@@ -1,5 +1,8 @@
 # Move FPS Counter Changelog
 
+## v2.1.0
+- Everything now works while fighting: dragging the counter, typing coordinates, changing the size, anchor or decimals, and reset all apply instantly mid-combat and in Mythic+ / rated PvP, with no errors — nothing waits silently for the fight to end anymore.
+
 ## v2.0.1
 - Fixed: on Retail the counter no longer gets stuck after reloading the UI mid-combat (or in Mythic+/rated PvP, which restrict addons even out of combat) — it now waits silently and resumes by itself once the fight is over.
 - Fixed: on Retail the FPS keybind toggle keeps working in combat instead of silently breaking after the addon loads.

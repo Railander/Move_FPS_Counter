@@ -1,15 +1,27 @@
-A super simple and super lightweight addon that allows moving the default FPS counter.
+# Move FPS Counter
 
-It also allows for automatically turning it on when you login/reload.
+Super lightweight addon that moves the default FPS counter and remembers its state, on every version of the game. Type `/movefps` in chat to open the configuration window.
 
-Type `/movefps` to open a config window where you can:
+## Commands
 
-*   Move the counter anywhere on the screen by simply dragging it, or type its exact X/Y coordinates
-*   Set the anchor: which part of the counter stays put (center, any side or any corner) when its width fluctuates between single-digit and triple-digit FPS
-*   Change the counter's text size
-*   Choose how many decimal places the framerate shows (0, 1 or 2)
-*   Remember the counter's shown/hidden state between sessions, so it comes back exactly as you left it when you login/reload
+- `/movefps` — open the configuration window
+- `/movefps reset` — restore every setting to the game's defaults
 
-`/movefps reset` restores every setting to the default.
+Any other input opens the window as well.
 
-Compatibility: works on every version of the game — Classic Era, TBC, Wrath, Cataclysm, Mists and Retail.
+## The config window
+
+- **move counter** — turn on move mode, then drag the counter anywhere; a green square marks its exact spot. Closing the window leaves move mode.
+- **X / Y** — move the counter, with boxes for exact values (or drag it in move mode)
+- **Size** — change the counter's text size, starting at the game's own size
+- **Decimals** — choose how many decimal places the framerate shows (0, 1 or 2)
+- **Anchor** — which part of the counter stays put (center, any side or any corner) when its width fluctuates between single-digit and triple-digit FPS
+- **Remember** — remember the counter's shown/hidden state between sessions, so it comes back exactly as you left it when you login/reload
+
+## Compatibility
+
+Works on Modern, Classic Era, TBC, Wrath, Cataclysm and Mists.
+
+## Links
+
+- [Changelog](CHANGELOG.md)
