@@ -20,7 +20,12 @@ Any other input opens the window as well.
 
 ## Compatibility
 
-Works on Modern, Classic Era, TBC, Wrath, Cataclysm and Mists.
+World of Warcraft: Midnight (12.1.0)
+World of Warcraft: Mists of Pandaria (5.5.4)
+World of Warcraft: Cataclysm (4.4.2)
+World of Warcraft: Wrath of the Lich King (3.4.5)
+World of Warcraft: The Burning Crusade (2.5.6)
+World of Warcraft: Classic Era (1.15.9)
 
 ## Links
 
