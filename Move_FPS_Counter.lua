@@ -1048,8 +1048,7 @@ SlashCmdList.MOVEFPS = function(msg)
 		return;
 	end
 	if string.match(msg or "", "^reset$") then
-		Move_FPS_Counter = {};
-		db = Move_FPS_Counter;
+		for k in pairs(db) do db[k] = nil; end -- wipe in place: db aliases stay valid
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize; -- the game's own size, never a 0 sentinel
 		MoveFPS_SetLocked(false);
