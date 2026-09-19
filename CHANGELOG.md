@@ -1,5 +1,8 @@
 # Move FPS Counter Changelog
 
+## v2.2.0
+- The counter now works in World of Warcraft: Forever (beta).
+
 ## v2.1.0
 - Everything now works while fighting: dragging the counter, typing coordinates, changing the size, anchor or decimals, and reset all apply instantly mid-combat and in Mythic+ / rated PvP, with no errors — nothing waits silently for the fight to end anymore.
 

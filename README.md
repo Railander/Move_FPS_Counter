@@ -20,6 +20,7 @@ Any other input opens the window as well.
 
 ## Compatibility
 
+- World of Warcraft: Forever (1.60.1)
 - World of Warcraft: Midnight (12.1.0)
 - World of Warcraft: Mists of Pandaria (5.5.4)
 - World of Warcraft: Cataclysm (4.4.2)
