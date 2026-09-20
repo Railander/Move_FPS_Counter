@@ -300,8 +300,11 @@ local function MoveFPS_MakeEditBox(parent, width, maxLetters, point, relativeTo,
 	-- and misplaces the digits. At this size even "-99999.99" fits.
 	box:SetFontObject("GameFontHighlight");
 	if box.SetTextInsets then
-		-- the search-border left cap protrudes 5px outside the frame
-		box:SetTextInsets(12, 8, 6, 6); -- equal vertical insets center the text
+		-- left/right insets stay SYMMETRIC (FCA lesson): SetJustifyH("CENTER")
+		-- centers the text field, so any asymmetry visibly shifts the typed
+		-- text off the box's middle. The 20px horizontal budget is unchanged
+		-- from the old 12+8, so the "-99999.99" fit guarantee above holds.
+		box:SetTextInsets(10, 10, 6, 6); -- equal vertical insets center the text
 	end
 	box:SetAutoFocus(false);
 	box:SetMaxLetters(maxLetters);
