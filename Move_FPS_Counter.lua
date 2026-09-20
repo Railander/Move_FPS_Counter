@@ -252,7 +252,10 @@ end
 
 -- ----------------------------------------------------------------------------
 -- config window, built on gated init inside a pcall: even if a widget template
--- is missing in some client flavor, the counter keeps working
+-- is missing in some client flavor, the counter keeps working. A partial
+-- build simply never assigns RefreshWindow (or the OnShow/OnHide scripts),
+-- and every RefreshWindow call site is nil-guarded, so the stub window and
+-- the slash command stay safe with whatever widgets did get built
 -- ----------------------------------------------------------------------------
 MoveFPS_CounterShown = function()
 	if MoveFPS_frame then
@@ -1051,6 +1054,13 @@ SlashCmdList.MOVEFPS = function(msg)
 		return;
 	end
 	if string.match(msg or "", "^reset$") then
+		-- end any in-flight drag first: its attached OnUpdate would
+		-- otherwise rewrite the restored defaults from the cursor on its
+		-- very next frame, silently undoing the reset
+		MoveFPS_dragActive = false;
+		if dragProxy then
+			dragProxy:SetScript("OnUpdate", nil);
+		end
 		for k in pairs(db) do db[k] = nil; end -- wipe in place: db aliases stay valid
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize; -- the game's own size, never a 0 sentinel

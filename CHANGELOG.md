@@ -1,7 +1,7 @@
 # Move FPS Counter Changelog
 
 ## Unreleased
-- Fixed CurseForge packaging ahead of the next release: the Forever interface rides its own setup file again instead of sharing the Mainline one (the packager rejects mixed game types in a single `-Mainline.toc`). Nothing changes in game.
+- Fixed an installation problem ahead of the next release: players on the Forever beta get the correct game version again. Nothing changes in game.
 
 ## v2.2.0
 - The counter now works in World of Warcraft: Forever (beta).

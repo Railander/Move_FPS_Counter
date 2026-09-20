@@ -27,6 +27,7 @@ source/
 !README.md
 !LICENSE
 !logo.tga
+!preview.gif
 !/.github/workflows/release.yml
 
 # local-only, never tracked even though the allowlist above would permit them
