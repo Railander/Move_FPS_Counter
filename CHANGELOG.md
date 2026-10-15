@@ -1,7 +1,8 @@
 # Move FPS Counter Changelog
 
-## Unreleased
+## v2.2.1
 - Fixed an installation problem ahead of the next release: players on the Forever beta get the correct game version again. Nothing changes in game.
+- The counter now works in World of Warcraft: Midnight (12.1.5). Nothing changes in game.
 
 ## v2.2.0
 - The counter now works in World of Warcraft: Forever (beta).
