@@ -4,10 +4,10 @@ Super lightweight addon that moves the default FPS counter and remembers its sta
 
 ## Commands
 
-- `/movefps` — open the configuration window
+- `/movefps` — open or close the configuration window
 - `/movefps reset` — restore every setting to the game's defaults
 
-Any other input opens the window as well.
+Any other input does the same.
 
 ## The config window
 

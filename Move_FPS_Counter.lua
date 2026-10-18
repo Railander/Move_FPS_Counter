@@ -264,6 +264,16 @@ MoveFPS_CounterShown = function()
 	return MoveFPS_text:IsShown();
 end
 
+-- The visibility as the player left it: the config window's preview
+-- force-show is not the player's state, but their own toggle while
+-- configuring is.
+local function MoveFPS_PlayerVisibility()
+	if options and options:IsShown() and not counterTouchedWhileOpen and counterShownSnapshot ~= nil then
+		return counterShownSnapshot;
+	end
+	return MoveFPS_CounterShown();
+end
+
 MoveFPS_SetCounterShown = function(shown)
 	-- Show/Hide carry no gate annotation and stay usable while protected;
 	-- callers that must not count as a user toggle wrap this in the quiet flag.
@@ -367,7 +377,7 @@ local function MoveFPS_DragUpdate()
 		return; -- idle frame: cheapest possible return, no queries at all
 	end
 	local pw, ph = UIParent:GetSize();
-	local cx, cy = GetCursorPosition(); -- already in UI units on this client
+	local cx, cy = GetCursorPosition(); -- the counter's own units (see MoveFPS_MeasuredAnchorU)
 	if cx == nil or cy == nil then
 		-- cursor unreadable mid-drag: end the gesture without persisting
 		-- anything further (db keeps the last good spot)
@@ -406,8 +416,11 @@ local function MoveFPS_SyncDragProxy()
 	end
 end
 
--- The counter's anchor point expressed in stored-coordinate units (UIParent
--- units: what SetPoint offsets, GetCursorPosition and the x/y boxes use).
+-- The counter's anchor point expressed in stored-coordinate units: what the
+-- counter's SetPoint offsets, GetCursorPosition and the x/y boxes use. The
+-- counter lives on WorldFrame on every flavor (scale 1, outside UIParent), so
+-- its offsets are scale-1 units -- the cursor's own -- and are never divided
+-- by UIParent's scale.
 -- Rect reads cannot be converted with a fixed factor: for a region parented
 -- outside UIParent (classic-era fonts live on the unscaled WorldFrame) each
 -- client flavor reports Get* values with its own scale and origin. So the
@@ -508,7 +521,7 @@ local function MoveFPS_BuildDragProxy()
 		-- anchor point. A placed counter needs no measuring at all: db already
 		-- IS the anchor point's position in UI units, so the grab is exact and
 		-- the counter cannot jump by a single pixel, whatever the ui scale.
-		local cx, cy = GetCursorPosition(); -- already in UI units on this client
+		local cx, cy = GetCursorPosition(); -- the counter's own units (see MoveFPS_MeasuredAnchorU)
 		if cx == nil or cy == nil then
 			return; -- cursor unreadable: refuse the grab without touching anything
 		end
@@ -702,16 +715,7 @@ local function MoveFPS_BuildOptionsWindow()
 		end
 		db.remember = self:GetChecked() and true or false;
 		if db.remember then
-			-- remember the visibility as the player left it: the window's
-			-- preview force-show is not the player's state, but their own
-			-- toggle while configuring is
-			if options:IsShown() and counterTouchedWhileOpen then
-				db.toggle = MoveFPS_CounterShown();
-			elseif options:IsShown() and counterShownSnapshot ~= nil then
-				db.toggle = counterShownSnapshot;
-			else
-				db.toggle = MoveFPS_CounterShown();
-			end
+			db.toggle = MoveFPS_PlayerVisibility();
 		end
 	end);
 
