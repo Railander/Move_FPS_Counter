@@ -1,5 +1,11 @@
 # Move FPS Counter Changelog
 
+## v2.2.3
+- Fixed: on Classic versions, grabbing the counter for the first time with a side or corner anchor no longer makes it jump.
+- Changing the anchor now keeps the counter exactly where it is on screen, even mid-drag; the X/Y boxes update to match.
+- The X/Y and size boxes show the saved value again when you press Escape, click away or type something invalid, and tidy up valid input on Enter.
+- `/movefps reset` also works in capitals or with extra spaces.
+
 ## v2.2.2
 - Maintenance release. Nothing changes in game.
 
