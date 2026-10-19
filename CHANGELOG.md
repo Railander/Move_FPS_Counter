@@ -1,6 +1,6 @@
 # Move FPS Counter Changelog
 
-## Unreleased
+## v2.2.4
 - The counter (in move mode) and the configuration window now move the moment you press the mouse button, with no dead zone before they start following the cursor.
 
 ## v2.2.3
