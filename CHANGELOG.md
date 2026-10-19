@@ -1,5 +1,8 @@
 # Move FPS Counter Changelog
 
+## Unreleased
+- The counter (in move mode) and the configuration window now move the moment you press the mouse button, with no dead zone before they start following the cursor.
+
 ## v2.2.3
 - Fixed: on Classic versions, grabbing the counter for the first time with a side or corner anchor no longer makes it jump.
 - Changing the anchor now keeps the counter exactly where it is on screen, even mid-drag; the X/Y boxes update to match.

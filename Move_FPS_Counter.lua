@@ -444,12 +444,13 @@ local function MoveFPS_BuildDragProxy()
 	dragProxy:Hide();
 	square:Hide();
 	dragProxy:EnableMouse(true);
-	dragProxy:RegisterForDrag("LeftButton");
 	-- No StartMoving anywhere: the built-in mover would fight the square's
 	-- counter-relative anchors. The square is ONLY ever counter-anchored and
 	-- the counter is ONLY ever cursor-driven: a single control loop.
-	dragProxy:SetScript("OnDragStart", function(self)
-		if not db then
+	-- The grab starts on the press itself (no drag threshold), so the counter
+	-- follows from the first pixel of movement.
+	dragProxy:SetScript("OnMouseDown", function(self, button)
+		if button ~= "LeftButton" or not db then
 			return;
 		end
 		local cx, cy = GetCursorPosition(); -- the counter's own units
@@ -472,7 +473,10 @@ local function MoveFPS_BuildDragProxy()
 		MoveFPS_dragActive = true;
 		self:SetScript("OnUpdate", MoveFPS_DragUpdate);
 	end);
-	dragProxy:SetScript("OnDragStop", function()
+	dragProxy:SetScript("OnMouseUp", function(_, button)
+		if button ~= "LeftButton" then
+			return;
+		end
 		MoveFPS_DragUpdate(); -- exact final position (drag still active)
 		MoveFPS_EndDrag();
 	end);
@@ -555,12 +559,13 @@ local function MoveFPS_BuildOptionsWindow()
 	options:SetSize(292, 184);
 	options:SetMovable(true);
 	options:EnableMouse(true);
-	options:RegisterForDrag("LeftButton");
 	options:SetClampedToScreen(true);
-	options:SetScript("OnDragStart", function(self)
-		self:StartMoving();
-	end);
-	options:SetScript("OnDragStop", function(self)
+	-- the window moves from the press itself (no drag threshold)
+	options:SetScript("OnMouseUp", function(self, button)
+		if button ~= "LeftButton" or not self.moving then
+			return;
+		end
+		self.moving = false;
 		self:StopMovingOrSizing();
 		if db then
 			local pw, ph = UIParent:GetSize();
@@ -588,7 +593,13 @@ local function MoveFPS_BuildOptionsWindow()
 			box:ClearFocus();
 		end
 	end
-	options:SetScript("OnMouseDown", ReleaseFocus);
+	options:SetScript("OnMouseDown", function(self, button)
+		ReleaseFocus();
+		if button == "LeftButton" then
+			self.moving = true;
+			self:StartMoving();
+		end
+	end);
 	if WorldFrame then
 		WorldFrame:HookScript("OnMouseUp", function()
 			if options:IsShown() then
@@ -702,7 +713,11 @@ local function MoveFPS_BuildOptionsWindow()
 			RefreshWindow();
 		end
 	end);
-	options:SetScript("OnHide", function()
+	options:SetScript("OnHide", function(self)
+		-- hidden mid-move (Escape): finish the move so the spot is saved
+		if self.moving then
+			self:GetScript("OnMouseUp")(self, "LeftButton");
+		end
 		-- leaving the window also leaves move mode
 		MoveFPS_SetMoveMode(false);
 		MoveFPS_EndDrag();
