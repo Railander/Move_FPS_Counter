@@ -1,5 +1,8 @@
 # Move FPS Counter Changelog
 
+## Unreleased
+- New: the configuration window has a Strata option (2 = lowest, 9 = highest) that controls how far in front of other interface elements the counter is drawn. It starts at the game's own level.
+
 ## v2.2.4
 - The counter (in move mode) and the configuration window now move the moment you press the mouse button, with no dead zone before they start following the cursor.
 

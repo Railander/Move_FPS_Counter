@@ -16,6 +16,7 @@ Any other input does the same.
 - **Size** — change the counter's text size, starting at the game's own size
 - **Decimals** — choose how many decimal places the framerate shows (0, 1 or 2)
 - **Anchor** — which part of the counter stays put (center, any side or any corner) when its width fluctuates between single-digit and triple-digit FPS
+- **Strata** — how far in front of the rest of the interface the counter is drawn: 2 is the lowest, 9 the highest. It starts at the game's own level.
 - **Remember** — remember the counter's shown/hidden state between sessions, so it comes back exactly as you left it when you login/reload
 
 ## Compatibility

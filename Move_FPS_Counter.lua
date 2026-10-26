@@ -36,6 +36,18 @@ local ANCHOR_DELTAS = {
 	TOP = { 0, 1 }, TOPRIGHT = { 1, 1 }, RIGHT = { 1, 0 }, BOTTOMRIGHT = { 1, -1 },
 	BOTTOM = { 0, -1 }, BOTTOMLEFT = { -1, -1 }, LEFT = { -1, 0 }, TOPLEFT = { -1, 1 },
 };
+local STRATAS = { "BACKGROUND", "LOW", "MEDIUM", "HIGH", "DIALOG", "FULLSCREEN", "FULLSCREEN_DIALOG", "TOOLTIP" };
+local MAX_STRATA = #STRATAS;
+-- the strata picker shows digits, not names: FULLSCREEN_DIALOG would clip
+-- against the arrow column, and a digit needs no width. Display-only:
+-- db.strata keeps the 1-8 STRATAS index, shown as 2-9.
+local function MoveFPS_StrataLabel(i)
+	return tostring(i + 1);
+end
+local MoveFPS_STRATA_LABELS = {};
+for i = 1, MAX_STRATA do
+	MoveFPS_STRATA_LABELS[i] = MoveFPS_StrataLabel(i);
+end
 
 local defaults = {
 	x = 0, y = 0;   -- position of the counter's anchor point, in counter units from the screen center
@@ -62,6 +74,9 @@ local MoveFPS_regions = {}; -- regions whose anchors we own and keep locked
 local MoveFPS_orig = {};    -- [region] = Blizzard's methods and anchors
 local MoveFPS_toggle;       -- the flavor's toggle for the counter's visibility
 local MoveFPS_locked;       -- true while our anchors are locked in place
+local MoveFPS_strataCarrier; -- classic only: frame that carries the fontstrings' strata
+local stockStrata;          -- the game's own counter strata, captured at load
+local stockStrataIndex = 3; -- db.strata value matching stockStrata (MEDIUM until captured)
 local gameDefaultSize = 12; -- the game's own counter font size, captured at load
 local options, dragProxy;   -- config window and its drag preview, created below
 local RefreshWindow;        -- assigned with the config window
@@ -134,6 +149,12 @@ local function MoveFPS_Sanitize(dbt)
 	if not MoveFPS_ValidCoord(dbt.x) then dbt.x = 0; end
 	if not MoveFPS_ValidCoord(dbt.y) then dbt.y = 0; end
 	if not ANCHOR_DELTAS[dbt.anchor] then dbt.anchor = "CENTER"; end
+	if dbt.strata ~= nil then
+		dbt.strata = math.floor(tonumber(dbt.strata) or 0);
+		if dbt.strata < 1 or dbt.strata > MAX_STRATA then
+			dbt.strata = nil; -- unknown: backfilled with the game's own strata below
+		end
+	end
 	dbt.size = MoveFPS_Round1(tonumber(dbt.size) or gameDefaultSize);
 	if not MoveFPS_ValidSize(dbt.size) then dbt.size = gameDefaultSize; end
 	dbt.decimals = math.floor(tonumber(dbt.decimals) or 1);
@@ -216,6 +237,37 @@ end
 local function MoveFPS_ApplySize()
 	MoveFPS_ApplyTextSize(MoveFPS_label);
 	MoveFPS_ApplyTextSize(MoveFPS_text);
+end
+
+-- The counter's frame strata. Modern clients own a frame, so it is set on the
+-- counter itself; classic counters are two plain fontstrings, which have no
+-- strata of their own, so a carrier frame (parented to WorldFrame, still
+-- unscaled) holds them and carries the strata. The game's own strata is the
+-- default and is re-asserted by reset.
+local function MoveFPS_ApplyStrata()
+	if not db then
+		return;
+	end
+	local target = MoveFPS_strataCarrier or MoveFPS_frame;
+	local want = STRATAS[db.strata or 0] or stockStrata;
+	if not (target and want) then
+		return;
+	end
+	-- already there: leave the frame's own strata (and its inheritance) alone
+	if target:GetFrameStrata() ~= want then
+		target:SetFrameStrata(want);
+	end
+end
+
+local function MoveFPS_SetStrata(strata)
+	if not db then
+		return;
+	end
+	db.strata = strata;
+	MoveFPS_ApplyStrata();
+	if RefreshWindow then
+		RefreshWindow();
+	end
 end
 
 local function MoveFPS_CounterShown()
@@ -556,7 +608,7 @@ local function MoveFPS_BuildOptionsWindow()
 	end
 	options = CreateFrame("Frame", "Move_FPS_CounterOptions", UIParent, "BackdropTemplate");
 	options:SetFrameStrata("HIGH");
-	options:SetSize(292, 184);
+	options:SetSize(292, 214);
 	options:SetMovable(true);
 	options:EnableMouse(true);
 	options:SetClampedToScreen(true);
@@ -687,8 +739,8 @@ local function MoveFPS_BuildOptionsWindow()
 	end);
 
 	-- remember the counter's visibility between sessions: the label +
-	-- checkbox pair sits centered in the window, below the Anchor row
-	options.rememberLabel = MoveFPS_MakeLabel(options, "Remember", "GameFontNormalLarge", "TOPLEFT", options, "TOPLEFT", 91, -158); -- pair (label + 8 + checkbox) centered horizontally
+	-- checkbox pair sits centered in the window, below the strata row
+	options.rememberLabel = MoveFPS_MakeLabel(options, "Remember", "GameFontNormalLarge", "TOPLEFT", options, "TOPLEFT", 91, -188); -- pair (label + 8 + checkbox) centered horizontally
 	options.remember = CreateFrame("CheckButton", "Move_FPS_CounterRemember", options, "UICheckButtonTemplate");
 	options.remember:SetSize(22, 22);
 	options.remember:SetPoint("LEFT", options.rememberLabel, "RIGHT", 8, 0);
@@ -751,6 +803,9 @@ local function MoveFPS_BuildOptionsWindow()
 		if options.anchorBtn then
 			options.anchorBtn:SetText(db.anchor);
 		end
+		if options.strataBtn then
+			options.strataBtn:SetText(MoveFPS_StrataLabel(db.strata or stockStrataIndex));
+		end
 		options.remember:SetChecked(db.remember);
 	end
 end
@@ -763,22 +818,24 @@ local function MoveFPS_EnsureMenuUtil()
 	end
 end
 
--- shared placement + row label for both anchor picker variants
-local function MoveFPS_StyleAnchorButton(button)
+-- shared placement + row label for both picker variants (anchor and strata)
+local function MoveFPS_StylePickerButton(button, label, rowTop, textWidth)
 	button:SetSize(160, 24);
-	button:SetPoint("TOPLEFT", options, "TOPLEFT", 96, -128);
-	options.anchorLabel = MoveFPS_MakeLabel(options, "Anchor", "GameFontNormalLarge", "RIGHT", button, "LEFT", -12, 0);
-end
-
-local function MoveFPS_BuildAnchorDropdown()
-	local button = CreateFrame("DropdownButton", nil, options, "WowStyle1DropdownTemplate");
-	MoveFPS_StyleAnchorButton(button);
+	button:SetPoint("TOPLEFT", options, "TOPLEFT", 96, rowTop);
 	if button.Text then
 		-- the classic template right-aligns the text at a small size
 		button.Text:SetFontObject("GameFontHighlightLarge");
 		button.Text:SetJustifyH("LEFT");
-		button.Text:SetWidth(124); -- room for BOTTOMRIGHT beside the arrow
+		if textWidth then
+			button.Text:SetWidth(textWidth); -- room for BOTTOMRIGHT beside the arrow
+		end
 	end
+	return MoveFPS_MakeLabel(options, label, "GameFontNormalLarge", "RIGHT", button, "LEFT", -12, 0);
+end
+
+local function MoveFPS_BuildAnchorDropdown()
+	local button = CreateFrame("DropdownButton", nil, options, "WowStyle1DropdownTemplate");
+	options.anchorLabel = MoveFPS_StylePickerButton(button, "Anchor", -128, 124);
 	button:SetupMenu(function(_, rootDescription)
 		if not db then
 			return;
@@ -794,7 +851,7 @@ end
 
 local function MoveFPS_BuildAnchorFallback()
 	local button = CreateFrame("Button", nil, options, "UIPanelButtonTemplate");
-	MoveFPS_StyleAnchorButton(button);
+	options.anchorLabel = MoveFPS_StylePickerButton(button, "Anchor", -128, 124);
 	button:SetScript("OnClick", function()
 		if not db then
 			return;
@@ -807,6 +864,35 @@ local function MoveFPS_BuildAnchorFallback()
 		end
 	end);
 	options.anchorBtn = button;
+end
+
+local function MoveFPS_BuildStrataDropdown()
+	local button = CreateFrame("DropdownButton", nil, options, "WowStyle1DropdownTemplate");
+	options.strataLabel = MoveFPS_StylePickerButton(button, "Strata", -158);
+	button:SetupMenu(function(_, rootDescription)
+		if not db then
+			return;
+		end
+		for i, text in ipairs(MoveFPS_STRATA_LABELS) do
+			rootDescription:CreateRadio(text, function(data)
+				return db.strata == data;
+			end, MoveFPS_SetStrata, i);
+		end
+	end);
+	options.strataBtn = button;
+end
+
+local function MoveFPS_BuildStrataFallback()
+	local button = CreateFrame("Button", nil, options, "UIPanelButtonTemplate");
+	options.strataLabel = MoveFPS_StylePickerButton(button, "Strata", -158);
+	button:SetScript("OnClick", function()
+		if not db then
+			return;
+		end
+		-- cycle the real values only, wrapping around
+		MoveFPS_SetStrata((db.strata or 0) % MAX_STRATA + 1);
+	end);
+	options.strataBtn = button;
 end
 
 -- ----------------------------------------------------------------------------
@@ -828,14 +914,38 @@ local function MoveFPS_LoadState()
 		MoveFPS_regions[1] = FramerateFrame;
 		MoveFPS_toggle = function() FramerateFrame:Toggle(); end;
 	elseif FramerateLabel and FramerateText then
-		-- classic clients: two fontstrings on WorldFrame
+		-- classic clients: two fontstrings on WorldFrame. Fontstrings have no
+		-- strata, and WorldFrame's own strata must stay untouched (it renders
+		-- the world), so a carrier frame -- still a child of the unscaled
+		-- WorldFrame, so the coordinate space does not change -- holds the pair
+		-- and carries their strata.
 		MoveFPS_label = FramerateLabel;
 		MoveFPS_text = FramerateText;
 		MoveFPS_regions[1] = FramerateLabel;
 		MoveFPS_regions[2] = FramerateText;
 		MoveFPS_toggle = function() ToggleFramerate(); end;
+		if WorldFrame then -- always present on these clients; nil-guard for the mock contract
+			MoveFPS_strataCarrier = CreateFrame("Frame", nil, WorldFrame);
+			MoveFPS_label:SetParent(MoveFPS_strataCarrier);
+			MoveFPS_text:SetParent(MoveFPS_strataCarrier);
+		end
 	else
 		return false;
+	end
+
+	-- the game's own strata, captured before any saved setting lands
+	local strataSource = MoveFPS_frame or WorldFrame;
+	if strataSource and strataSource.GetFrameStrata then
+		stockStrata = strataSource:GetFrameStrata();
+	end
+	if not stockStrata then
+		stockStrata = "MEDIUM"; -- client default when the read is unavailable
+	end
+	for i, name in ipairs(STRATAS) do
+		if name == stockStrata then
+			stockStrataIndex = i;
+			break;
+		end
 	end
 
 	local freshDB = _G[ADDON_NAME] == nil;
@@ -867,6 +977,9 @@ local function MoveFPS_LoadState()
 	local upgraded = MoveFPS_BackfillLegacy(db);
 	MergeDefaults(db, defaults);
 	MoveFPS_Sanitize(db);
+	if db.strata == nil then
+		db.strata = stockStrataIndex; -- preselect the game's own strata
+	end
 	if freshDB or upgraded then
 		MoveFPS_instructions(); -- first generation, or a v1 table upgrading
 	end
@@ -902,6 +1015,12 @@ local function MoveFPS_EnsureInit()
 			pcall(MoveFPS_BuildAnchorFallback);
 		end
 	end
+	if options and not options.strataBtn then
+		pcall(MoveFPS_BuildStrataDropdown);
+		if not options.strataBtn then
+			pcall(MoveFPS_BuildStrataFallback);
+		end
+	end
 	if not MoveFPS_stateLoaded then
 		return;
 	end
@@ -912,6 +1031,7 @@ local function MoveFPS_EnsureInit()
 		end
 		MoveFPS_ApplyPosition();
 		MoveFPS_ApplySize();
+		MoveFPS_ApplyStrata();
 		if not db.placed then
 			MoveFPS_StoreGamePlacement(); -- self-guarded: no-op when unreadable
 		end
@@ -934,6 +1054,7 @@ local function MoveFPS_EnsureInit()
 	else
 		MoveFPS_ApplyPosition();
 		MoveFPS_ApplySize();
+		MoveFPS_ApplyStrata();
 	end
 	MoveFPS_PlaceWindow();
 end
@@ -968,10 +1089,12 @@ SlashCmdList.MOVEFPS = function(msg)
 		for k in pairs(db) do db[k] = nil; end -- wipe in place: db aliases stay valid
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize;
+		db.strata = stockStrataIndex;
 		MoveFPS_SetLocked(false);
 		-- hand the anchors back first, then measure the game's own spot
 		MoveFPS_ApplyPosition();
 		MoveFPS_ApplySize();
+		MoveFPS_ApplyStrata();
 		MoveFPS_StoreGamePlacement();
 		MoveFPS_PlaceWindow();
 	elseif options then
