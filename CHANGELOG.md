@@ -1,6 +1,6 @@
 # Move FPS Counter Changelog
 
-## Unreleased
+## v2.3.0
 - New: the configuration window has a Strata option (2 = lowest, 9 = highest) that controls how far in front of other interface elements the counter is drawn. It starts at the game's own level.
 
 ## v2.2.4
