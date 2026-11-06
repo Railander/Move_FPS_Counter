@@ -1,5 +1,11 @@
 # Move FPS Counter Changelog
 
+## v2.3.1
+- Fixed: during events with a temporary vehicle/override action bar (such as Aqir invasions), a placed FPS counter could break the action bars: only the first bar stayed visible while the override bar looped its slide animation. The counter now holds its position without interfering with action-bar transitions.
+- Fixed: on the first login after installing, the X/Y boxes could show a position slightly off from where the counter actually sits, and entering a value in one box could shift the counter in the other direction. The saved position now matches the counter's real spot, including after `/movefps reset`.
+- Fixed: a damaged saved setting or an unreadable mouse position during a move could make the counter disappear and stay gone. Values that are not real numbers are now ignored: the last good position is kept, and a damaged saved position, size, decimals or window spot falls back to its default (or the game's own placement).
+- The X, Y and Size boxes and the Decimals slider also ignore text or values that are not real numbers, such as `nan` or `inf`.
+
 ## v2.3.0
 - New: the configuration window has a Strata option (2 = lowest, 9 = highest) that controls how far in front of other interface elements the counter is drawn. It starts at the game's own level.
 

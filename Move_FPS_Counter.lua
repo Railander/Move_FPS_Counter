@@ -3,19 +3,22 @@
 -- of the game. One shared implementation; at load the runtime picks the flavor:
 --   * modern clients: the FramerateFrame from Blizzard_FramerateFrame
 --   * classic clients: the FramerateLabel/FramerateText fontstrings on WorldFrame
--- Once placed, the anchors are locked (the original methods are kept privately
--- and the region's own ones become no-ops), so no later Blizzard re-anchor, UI
--- reload pass or other addon can displace the counter. Everything is event
--- driven: no polling and no per-frame code outside an active drag. /movefps
--- opens the config window (with a move mode that makes the counter
--- drag-movable), /movefps reset restores the defaults.
+-- Once placed, a slow guard timer puts the counter back on its stored spot if
+-- a later Blizzard re-anchor or another addon displaces it. The guard is a
+-- timer, not a method override: replacing FramerateFrame's ClearAllPoints /
+-- SetPoint taints MicroMenu's layout path, and the taint then blocks the
+-- protected OverrideActionBar:Show() during action-bar transitions (the Aqir
+-- invasion freeze). The guard is the only repeating timer (0.25s, only while
+-- placed); everything else is event driven, with no per-frame code outside an
+-- active drag. /movefps opens the config window (with a move mode that makes
+-- the counter drag-movable), /movefps reset restores the defaults.
 --
 -- Midnight (12.x) restrictions: nothing this addon touches can become
 -- secret-marked (it ingests no unit/combat/aura data -- framerate text only),
 -- so every op just attempts, with no restriction checks and no queues. If the
 -- engine ever refuses, it errors loudly instead of failing silently. The only
 -- guards are crash-safety (nil reads abort geometry) and correctness (the
--- placed-state anchor lock, the already-there early-outs).
+-- placed-state position guard, the already-there early-outs).
 
 local ADDON_NAME = "Move_FPS_Counter";
 
@@ -70,10 +73,10 @@ local db; -- alias for the Move_FPS_Counter SavedVariables table, set on ADDON_L
 local MoveFPS_frame;        -- modern clients only: FramerateFrame as a whole
 local MoveFPS_label;        -- the "FPS" label fontstring
 local MoveFPS_text;         -- the number fontstring
-local MoveFPS_regions = {}; -- regions whose anchors we own and keep locked
+local MoveFPS_regions = {}; -- regions whose anchors we own and keep in place
 local MoveFPS_orig = {};    -- [region] = Blizzard's methods and anchors
 local MoveFPS_toggle;       -- the flavor's toggle for the counter's visibility
-local MoveFPS_locked;       -- true while our anchors are locked in place
+local MoveFPS_guardTimer;   -- slow re-assert timer while the counter is placed
 local MoveFPS_strataCarrier; -- classic only: frame that carries the fontstrings' strata
 local stockStrata;          -- the game's own counter strata, captured at load
 local stockStrataIndex = 3; -- db.strata value matching stockStrata (MEDIUM until captured)
@@ -87,6 +90,7 @@ local MoveFPS_stateLoaded = false;    -- flavor resolved + db backfilled
 local MoveFPS_initDone = false;       -- one-time login restore finished
 local MoveFPS_dragActive = false;     -- a drag gesture is in flight
 local MoveFPS_quietVisibility = false; -- programmatic Show/Hide: don't track as a user toggle
+local MoveFPS_CancelSettle;           -- assigned below: stop the bounded settle re-measure
 
 local function MoveFPS_Round2(v)
 	return math.floor(v * 100 + 0.5) / 100;
@@ -96,12 +100,25 @@ local function MoveFPS_Round1(v)
 	return math.floor(v * 10 + 0.5) / 10;
 end
 
+-- a cursor or slider reading the client cannot produce (0/0, inf) must never
+-- be committed: keep the value already stored
+local function MoveFPS_Finite(v)
+	return type(v) == "number" and v == v and math.abs(v) ~= math.huge;
+end
+
+local function MoveFPS_FiniteOr(value, fallback)
+	if MoveFPS_Finite(value) then
+		return value;
+	end
+	return fallback;
+end
+
 local function MoveFPS_ValidSize(n)
-	return n and n >= MIN_SIZE and n <= MAX_SIZE;
+	return MoveFPS_Finite(n) and n >= MIN_SIZE and n <= MAX_SIZE;
 end
 
 local function MoveFPS_ValidCoord(v)
-	return v and v >= -MAX_COORD and v <= MAX_COORD;
+	return MoveFPS_Finite(v) and v >= -MAX_COORD and v <= MAX_COORD;
 end
 
 -- recursive default backfill; never overwrites an existing value
@@ -151,14 +168,14 @@ local function MoveFPS_Sanitize(dbt)
 	if not ANCHOR_DELTAS[dbt.anchor] then dbt.anchor = "CENTER"; end
 	if dbt.strata ~= nil then
 		dbt.strata = math.floor(tonumber(dbt.strata) or 0);
-		if dbt.strata < 1 or dbt.strata > MAX_STRATA then
+		if not MoveFPS_Finite(dbt.strata) or dbt.strata < 1 or dbt.strata > MAX_STRATA then
 			dbt.strata = nil; -- unknown: backfilled with the game's own strata below
 		end
 	end
 	dbt.size = MoveFPS_Round1(tonumber(dbt.size) or gameDefaultSize);
 	if not MoveFPS_ValidSize(dbt.size) then dbt.size = gameDefaultSize; end
 	dbt.decimals = math.floor(tonumber(dbt.decimals) or 1);
-	if dbt.decimals < 0 or dbt.decimals > 2 then dbt.decimals = 1; end
+	if not MoveFPS_Finite(dbt.decimals) or dbt.decimals < 0 or dbt.decimals > 2 then dbt.decimals = 1; end
 	dbt.placed = dbt.placed and true or false;
 	dbt.remember = dbt.remember and true or false;
 	dbt.toggle = dbt.toggle and true or false;
@@ -167,31 +184,13 @@ local function MoveFPS_Sanitize(dbt)
 	end
 	dbt.win.x = MoveFPS_Round2(tonumber(dbt.win.x) or 0);
 	dbt.win.y = MoveFPS_Round2(tonumber(dbt.win.y) or 0);
+	if not MoveFPS_Finite(dbt.win.x) then dbt.win.x = 0; end
+	if not MoveFPS_Finite(dbt.win.y) then dbt.win.y = 0; end
 end
 
 -- ----------------------------------------------------------------------------
 -- core: placement, size, visibility
 -- ----------------------------------------------------------------------------
-
--- Placement lock: while placed, the region's own anchor methods are no-ops so
--- nothing can move the counter behind our back; unplaced (never placed), it
--- behaves exactly like the stock game.
-local function MoveFPS_SetLocked(locked)
-	if locked == MoveFPS_locked then
-		return;
-	end
-	MoveFPS_locked = locked;
-	for _, region in ipairs(MoveFPS_regions) do
-		local orig = MoveFPS_orig[region];
-		if locked then
-			region.ClearAllPoints = function() end;
-			region.SetPoint = function() end;
-		else
-			region.ClearAllPoints = orig.clear;
-			region.SetPoint = orig.setPoint;
-		end
-	end
-end
 
 local function MoveFPS_ApplyAnchor(region, point, relativeTo, relativePoint, x, y)
 	local orig = MoveFPS_orig[region];
@@ -217,11 +216,77 @@ local function MoveFPS_ApplyPosition()
 	end
 end
 
+-- Position guard: never replace Blizzard's frame methods. Overriding
+-- FramerateFrame's ClearAllPoints/SetPoint taints MicroMenu's layout path
+-- (MicroMenu:ResetMicroMenuPosition -> MicroMenu:Layout ->
+-- FramerateFrame:UpdatePosition, which calls those methods), and the tainted
+-- path then blocks the protected OverrideActionBar:Show() a few calls later in
+-- ValidateActionBarTransition. That is the Aqir invasion action-bar freeze:
+-- only the main bar remains and the override bar loops its slide animation.
+-- Re-assert the stored point from a slow timer instead, so no Blizzard code
+-- ever reads an addon-owned method.
+local MOVE_GUARD_INTERVAL = 0.25;
+
+local function MoveFPS_RegionOnPoint(region, point, relativeTo, relativePoint, x, y)
+	if not region then
+		return false;
+	end
+	local count = region.GetNumPoints and region:GetNumPoints() or 0;
+	if count ~= 1 then
+		return false;
+	end
+	local gotPoint, gotRelativeTo, gotRelativePoint, gotX, gotY = region:GetPoint(1);
+	if gotPoint ~= point or gotRelativeTo ~= relativeTo or gotRelativePoint ~= relativePoint then
+		return false;
+	end
+	return math.abs((gotX or 0) - x) <= 0.01 and math.abs((gotY or 0) - y) <= 0.01;
+end
+
+local function MoveFPS_PositionIsCurrent()
+	if MoveFPS_frame then
+		return MoveFPS_RegionOnPoint(MoveFPS_frame, db.anchor, UIParent, "CENTER", db.x, db.y);
+	end
+	return MoveFPS_RegionOnPoint(MoveFPS_label, db.anchor, UIParent, "CENTER", db.x, db.y)
+		and MoveFPS_RegionOnPoint(MoveFPS_text, "LEFT", MoveFPS_label, "RIGHT", 0, 0);
+end
+
+local function MoveFPS_GuardTick()
+	MoveFPS_guardTimer = nil;
+	if not (db and db.placed) then
+		return;
+	end
+	if not MoveFPS_PositionIsCurrent() then
+		MoveFPS_ApplyPosition();
+	end
+	if C_Timer and C_Timer.NewTimer then
+		MoveFPS_guardTimer = C_Timer.NewTimer(MOVE_GUARD_INTERVAL, MoveFPS_GuardTick);
+	end
+end
+
+local function MoveFPS_StartGuard()
+	if MoveFPS_guardTimer or not (db and db.placed) then
+		return;
+	end
+	if C_Timer and C_Timer.NewTimer then
+		MoveFPS_guardTimer = C_Timer.NewTimer(MOVE_GUARD_INTERVAL, MoveFPS_GuardTick);
+	end
+end
+
+local function MoveFPS_StopGuard()
+	if MoveFPS_guardTimer then
+		MoveFPS_guardTimer:Cancel();
+		MoveFPS_guardTimer = nil;
+	end
+end
+
 -- places the counter at the stored spot from now on (any input path)
 local function MoveFPS_Place()
 	db.placed = true;
-	MoveFPS_SetLocked(true);
+	if MoveFPS_CancelSettle then
+		MoveFPS_CancelSettle(); -- the user's own spot wins over the settle re-measure
+	end
 	MoveFPS_ApplyPosition();
+	MoveFPS_StartGuard();
 end
 
 local function MoveFPS_ApplyTextSize(region)
@@ -237,6 +302,19 @@ end
 local function MoveFPS_ApplySize()
 	MoveFPS_ApplyTextSize(MoveFPS_label);
 	MoveFPS_ApplyTextSize(MoveFPS_text);
+end
+
+-- Modern clients size FramerateFrame from its fontstrings in Blizzard's
+-- ResizeLayoutMixin, which normally runs on the frame's next OnUpdate. A
+-- reset measures immediately after restoring the stock font size, so force
+-- that layout first: otherwise the measurement uses the previous size and the
+-- stored spot is half a size change away from where the counter really is.
+-- Classic counters are plain fontstrings (no layout frame), so there is
+-- nothing to force there.
+local function MoveFPS_Relayout()
+	if MoveFPS_frame and MoveFPS_frame.Layout then
+		MoveFPS_frame:Layout();
+	end
 end
 
 -- The counter's frame strata. Modern clients own a frame, so it is set on the
@@ -341,6 +419,31 @@ local function MoveFPS_RectAnchorPoint(region)
 		(top + bottom) / 2 + delta[2] * (top - bottom) / 2;
 end
 
+-- The point(s) a region has right now. A measure can run after the client's
+-- own login layout, when Blizzard may already have re-anchored the counter
+-- (the micro menu does), so it restores THIS snapshot rather than the anchors
+-- captured at ADDON_LOADED -- an unplaced counter must keep behaving exactly
+-- like stock.
+local function MoveFPS_CurrentPoints(region)
+	local points = {};
+	local count = region.GetNumPoints and region:GetNumPoints() or 1;
+	for i = 1, count do
+		local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, i);
+		if ok and point then
+			points[#points + 1] = { point, relativeTo, relativePoint, x, y };
+		end
+	end
+	return points;
+end
+
+local function MoveFPS_RestorePoints(region, points)
+	local orig = MoveFPS_orig[region];
+	orig.clear(region);
+	for _, p in ipairs(points) do
+		orig.setPoint(region, p[1], p[2], p[3], p[4], p[5]);
+	end
+end
+
 -- The counter's anchor point in stored units: the SetPoint offset from
 -- UIParent's center that would put it exactly where it sits now. The counter
 -- lives on WorldFrame on every flavor (scale 1, outside UIParent), so its
@@ -351,8 +454,8 @@ end
 -- and origin. So the mapping is measured instead of assumed: pin the region
 -- to two known UIParent spots, read the rect back, and solve the per-axis
 -- affine mapping (scale and origin, so even a flipped or offset convention
--- cancels). Everything runs inside the calling handler and the counter's own
--- placement is restored before returning, so nothing renders mid-measure.
+-- cancels). Everything runs inside the calling handler and the region's own
+-- point(s) are restored before returning, so nothing renders mid-measure.
 -- The anchored region is the label on classic (the number hangs off its
 -- right edge), so its own rect is what the anchor point is measured on.
 local function MoveFPS_MeasuredAnchor()
@@ -362,11 +465,12 @@ local function MoveFPS_MeasuredAnchor()
 		return nil, nil;
 	end
 	local CAL = 100;
+	local saved = MoveFPS_CurrentPoints(region);
 	MoveFPS_ApplyAnchor(region, "CENTER", UIParent, "CENTER", 0, 0);
 	local k1x, k1y = region:GetCenter();
 	MoveFPS_ApplyAnchor(region, "CENTER", UIParent, "CENTER", CAL, CAL);
 	local k2x, k2y = region:GetCenter();
-	MoveFPS_ApplyPosition(); -- back where it was
+	MoveFPS_RestorePoints(region, saved); -- exactly where it was when we started
 	if k1x == nil or k1y == nil or k2x == nil or k2y == nil then
 		return nil, nil;
 	end
@@ -375,7 +479,11 @@ local function MoveFPS_MeasuredAnchor()
 	if math.abs(sx) < 1e-8 then sx = 1; end
 	if math.abs(sy) < 1e-8 then sy = 1; end
 	-- read = read(offset 0) + slope * offset, solved per axis
-	return (gx - k1x) / sx, (gy - k1y) / sy;
+	local x, y = (gx - k1x) / sx, (gy - k1y) / sy;
+	if not (MoveFPS_Finite(x) and MoveFPS_Finite(y)) then
+		return nil, nil; -- nonsensical geometry: no box beats a wrong box
+	end
+	return x, y;
 end
 
 -- with the counter sitting on its game placement, remember that spot as real
@@ -388,6 +496,100 @@ local function MoveFPS_StoreGamePlacement()
 	end
 	db.x, db.y = MoveFPS_Round2(x), MoveFPS_Round2(y);
 	return true;
+end
+
+-- Login lays the counter out from its first rendered text, AFTER ADDON_LOADED.
+-- The store above therefore measures whatever size the frame still has at load
+-- (the XML placeholder on modern clients), and the spot the player actually
+-- sees once the text renders differs by the half-width the layout adds. This
+-- bounded re-measure follows the same product rule -- the boxes tell the truth
+-- before the first move -- by waiting for the text to render and the frame's
+-- width to hold steady for one step, then storing that settled spot once.
+-- It only READS geometry: MoveFPS_MeasuredAnchor restores the region's own
+-- point(s), so the counter never moves. One C_Timer per attempt, never
+-- per-frame Lua; it stops on the user's first placement, on logout, or after
+-- SETTLE_ATTEMPTS (about a second). Nothing is marked placed: only a real user
+-- placement (drag/commit) may do that.
+local SETTLE_STEP = 0.05;
+local SETTLE_ATTEMPTS = 20;
+local MoveFPS_settleTimer;  -- the pending attempt (cancellable)
+local MoveFPS_settleLeft;   -- attempts left in this window
+local MoveFPS_settleWidth;  -- last width read: settle = two equal reads
+
+function MoveFPS_CancelSettle()
+	if MoveFPS_settleTimer then
+		MoveFPS_settleTimer:Cancel();
+		MoveFPS_settleTimer = nil;
+	end
+	MoveFPS_settleLeft = nil;
+	MoveFPS_settleWidth = nil;
+end
+
+-- true when the settled spot has been stored and the window stopped; false
+-- while the counter is still rendering or resizing
+local function MoveFPS_TryStoreSettled()
+	if not (db and not db.placed and MoveFPS_text) then
+		return false;
+	end
+	local text = MoveFPS_text:GetText();
+	if text == nil or text == "" then
+		return false; -- the number has not been rendered yet
+	end
+	local region = MoveFPS_frame or MoveFPS_label;
+	local width = region and region.GetWidth and region:GetWidth();
+	if not (width and width > 0) then
+		return false;
+	end
+	if MoveFPS_settleWidth == nil then
+		MoveFPS_settleWidth = width; -- first sighting: confirm it survives one step
+		return false;
+	end
+	if math.abs(width - MoveFPS_settleWidth) > 0.01 then
+		MoveFPS_settleWidth = width; -- still laying out: restart the confirmation
+		return false;
+	end
+	local oldX, oldY = db.x, db.y;
+	if MoveFPS_StoreGamePlacement() and (db.x ~= oldX or db.y ~= oldY) then
+		-- the boxes may be open right now: they must never keep the placeholder
+		if options and options:IsShown() and RefreshWindow then
+			RefreshWindow();
+		end
+	end
+	MoveFPS_CancelSettle();
+	return true;
+end
+
+-- (Re)start the bounded settle window. Safe to call repeatedly: opening the
+-- options window starts a fresh window (its preview may be what shows a
+-- counter that was hidden through login); once db.placed is true it only
+-- cancels.
+local function MoveFPS_RefreshGamePlacement()
+	if not (db and not db.placed) then
+		MoveFPS_CancelSettle();
+		return;
+	end
+	if not C_Timer or not C_Timer.NewTimer then
+		return; -- no timer surface: keep the ADDON_LOADED fallback
+	end
+	MoveFPS_CancelSettle();
+	MoveFPS_settleLeft = SETTLE_ATTEMPTS;
+	local function Step()
+		MoveFPS_settleTimer = nil;
+		if not (db and not db.placed) then
+			MoveFPS_CancelSettle();
+			return;
+		end
+		if MoveFPS_TryStoreSettled() then
+			return;
+		end
+		MoveFPS_settleLeft = MoveFPS_settleLeft - 1;
+		if MoveFPS_settleLeft <= 0 then
+			MoveFPS_CancelSettle(); -- never rendered (hidden all session): give up
+			return;
+		end
+		MoveFPS_settleTimer = C_Timer.NewTimer(SETTLE_STEP, Step);
+	end
+	Step(); -- take the first sample now; wait a step only if not settled
 end
 
 -- Switching the anchor keeps the counter exactly where it is on screen: a
@@ -441,12 +643,12 @@ local function MoveFPS_DragUpdate()
 		return;
 	end
 	local cx, cy = GetCursorPosition(); -- the counter's own units (see MoveFPS_MeasuredAnchor)
-	if cx == nil or cy == nil then
+	if not (MoveFPS_Finite(cx) and MoveFPS_Finite(cy)) then
 		MoveFPS_EndDrag(); -- db keeps the last good spot
 		return;
 	end
-	db.x = MoveFPS_Round2(cx - MoveFPS_grabDX);
-	db.y = MoveFPS_Round2(cy - MoveFPS_grabDY);
+	db.x = MoveFPS_FiniteOr(MoveFPS_Round2(cx - MoveFPS_grabDX), db.x);
+	db.y = MoveFPS_FiniteOr(MoveFPS_Round2(cy - MoveFPS_grabDY), db.y);
 	MoveFPS_Place();
 	if RefreshWindow then
 		RefreshWindow(); -- the x/y boxes update live while dragging
@@ -506,7 +708,7 @@ local function MoveFPS_BuildDragProxy()
 			return;
 		end
 		local cx, cy = GetCursorPosition(); -- the counter's own units
-		if cx == nil or cy == nil then
+		if not (MoveFPS_Finite(cx) and MoveFPS_Finite(cy)) then
 			return; -- cursor unreadable: refuse the grab without touching anything
 		end
 		-- capture where the cursor grabbed the counter relative to its anchor
@@ -625,7 +827,8 @@ local function MoveFPS_BuildOptionsWindow()
 			if pw == nil or ph == nil or cx == nil or cy == nil then
 				return; -- unreadable: keep the last good window spot
 			end
-			db.win.x, db.win.y = MoveFPS_Round2(cx - pw / 2), MoveFPS_Round2(cy - ph / 2);
+			db.win.x = MoveFPS_FiniteOr(MoveFPS_Round2(cx - pw / 2), db.win.x);
+			db.win.y = MoveFPS_FiniteOr(MoveFPS_Round2(cy - ph / 2), db.win.y);
 			MoveFPS_PlaceWindow();
 		end
 	end);
@@ -730,11 +933,16 @@ local function MoveFPS_BuildOptionsWindow()
 	end
 	options.decimalsLabel = MoveFPS_MakeLabel(options, "Decimals", "GameFontNormalLarge", "RIGHT", options.decimals, "LEFT", -12, 0);
 	options.decimalsValue = MoveFPS_MakeLabel(options, "1", "GameFontNormalLarge", "LEFT", options.decimals, "RIGHT", 6, 0);
-	options.decimals:SetScript("OnValueChanged", function(_, value)
+	options.decimals:SetScript("OnValueChanged", function(self, value)
 		value = math.floor(value + 0.5);
+		value = MoveFPS_FiniteOr(value, db and db.decimals or 1);
+		if value < 0 then value = 0; elseif value > 2 then value = 2; end
 		if db and db.decimals ~= value then
 			db.decimals = value;
 			options.decimalsValue:SetText(tostring(value));
+		end
+		if value ~= self:GetValue() then
+			self:SetValue(value); -- a refused reading snaps back to the stored stop
 		end
 	end);
 
@@ -764,6 +972,9 @@ local function MoveFPS_BuildOptionsWindow()
 		if RefreshWindow then
 			RefreshWindow();
 		end
+		-- the preview may be the first time the counter renders (it can start
+		-- hidden): re-measure the settled spot before the boxes are read
+		MoveFPS_RefreshGamePlacement();
 	end);
 	options:SetScript("OnHide", function(self)
 		-- hidden mid-move (Escape): finish the move so the spot is saved
@@ -1026,14 +1237,13 @@ local function MoveFPS_EnsureInit()
 	end
 	if not MoveFPS_initDone then
 		MoveFPS_initDone = true;
-		if db.placed then
-			MoveFPS_SetLocked(true);
-		end
 		MoveFPS_ApplyPosition();
+		MoveFPS_StartGuard();
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
 		if not db.placed then
 			MoveFPS_StoreGamePlacement(); -- self-guarded: no-op when unreadable
+			MoveFPS_RefreshGamePlacement(); -- re-measure once the text has laid out
 		end
 		-- restore the visibility BEFORE hooking the toggle so our own restore
 		-- does not count as a user toggle. Toggle flips: only when hidden.
@@ -1053,6 +1263,7 @@ local function MoveFPS_EnsureInit()
 		end
 	else
 		MoveFPS_ApplyPosition();
+		MoveFPS_StartGuard();
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
 	end
@@ -1061,8 +1272,16 @@ end
 
 local MoveFPS_EventFrame = CreateFrame("Frame", "Move_FPS_CounterEventFrame");
 MoveFPS_EventFrame:RegisterEvent("ADDON_LOADED");
-MoveFPS_EventFrame:SetScript("OnEvent", function(self, _, name)
-	if name == ADDON_NAME then
+MoveFPS_EventFrame:RegisterEvent("PLAYER_LOGOUT");
+MoveFPS_EventFrame:SetScript("OnEvent", function(self, event, name)
+	if event == "PLAYER_LOGOUT" then
+		-- the session is over: no pending re-measure or guard may keep a timer alive
+		if MoveFPS_CancelSettle then
+			MoveFPS_CancelSettle();
+		end
+		MoveFPS_StopGuard();
+		self:UnregisterEvent("PLAYER_LOGOUT");
+	elseif event == "ADDON_LOADED" and name == ADDON_NAME then
 		self:UnregisterEvent("ADDON_LOADED");
 		if MoveFPS_LoadState() then
 			MoveFPS_EnsureInit();
@@ -1086,15 +1305,16 @@ SlashCmdList.MOVEFPS = function(msg)
 		-- end any in-flight drag first: its OnUpdate would otherwise rewrite
 		-- the restored defaults from the cursor on its very next frame
 		MoveFPS_EndDrag();
+		MoveFPS_StopGuard();
 		for k in pairs(db) do db[k] = nil; end -- wipe in place: db aliases stay valid
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize;
 		db.strata = stockStrataIndex;
-		MoveFPS_SetLocked(false);
 		-- hand the anchors back first, then measure the game's own spot
 		MoveFPS_ApplyPosition();
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
+		MoveFPS_Relayout(); -- size changes only lay out on the next OnUpdate
 		MoveFPS_StoreGamePlacement();
 		MoveFPS_PlaceWindow();
 	elseif options then
