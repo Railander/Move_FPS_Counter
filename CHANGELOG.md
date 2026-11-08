@@ -1,5 +1,11 @@
 # Move FPS Counter Changelog
 
+## v2.3.2
+- Fixed: opening the configuration window no longer snaps an unmoved counter back to the spot it had at login. Until the counter is placed it keeps following the game's own layout, including micro menu / Edit Mode changes; `/movefps reset` likewise leaves an unmoved counter where the game put it.
+- Fixed: on Classic versions, the green move-mode square now follows the counter's Strata setting instead of staying at the default level.
+- Fixed: on a game version whose FPS counter layout is not recognized, loading the addon no longer errors; it stays inactive instead.
+- Fixed: changing the Anchor while the counter sat at the extreme edge of the coordinate range could make a later reload put it back at the center; the spot now stays where the player put it.
+
 ## v2.3.1
 - Fixed: during events with a temporary vehicle/override action bar (such as Aqir invasions), a placed FPS counter could break the action bars: only the first bar stayed visible while the override bar looped its slide animation. The counter now holds its position without interfering with action-bar transitions.
 - Fixed: on the first login after installing, the X/Y boxes could show a position slightly off from where the counter actually sits, and entering a value in one box could shift the counter in the other direction. The saved position now matches the counter's real spot, including after `/movefps reset`.

@@ -25,7 +25,7 @@ Any other input does the same.
 - World of Warcraft: Midnight (12.1.5)
 - World of Warcraft: Mists of Pandaria (5.5.4)
 - World of Warcraft: Cataclysm (4.4.2)
-- World of Warcraft: Wrath of the Lich King (3.4.5)
+- World of Warcraft: Wrath of the Lich King (3.4.3)
 - World of Warcraft: The Burning Crusade (2.5.6)
 - World of Warcraft: Classic Era (1.15.9)
 

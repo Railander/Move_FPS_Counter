@@ -198,20 +198,53 @@ local function MoveFPS_ApplyAnchor(region, point, relativeTo, relativePoint, x, 
 	orig.setPoint(region, point, relativeTo, relativePoint, x, y);
 end
 
-local function MoveFPS_ApplyPosition()
-	if db.placed then
-		if MoveFPS_frame then
-			MoveFPS_ApplyAnchor(MoveFPS_frame, db.anchor, UIParent, "CENTER", db.x, db.y);
-		else
-			MoveFPS_ApplyAnchor(MoveFPS_label, db.anchor, UIParent, "CENTER", db.x, db.y);
-			MoveFPS_ApplyAnchor(MoveFPS_text, "LEFT", MoveFPS_label, "RIGHT", 0, 0);
+-- The full anchor set a region has right now. A stock frame can carry more
+-- than one point (stretched layouts, another addon's anchors): restoring only
+-- the first would resize or move it, so every point is kept.
+local function MoveFPS_CurrentPoints(region)
+	local points = {};
+	local count = region.GetNumPoints and region:GetNumPoints() or 1;
+	for i = 1, count do
+		local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, i);
+		if ok and point then
+			points[#points + 1] = { point, relativeTo, relativePoint, x, y };
 		end
+	end
+	return points;
+end
+
+local function MoveFPS_RestorePoints(region, points)
+	local orig = MoveFPS_orig[region];
+	orig.clear(region);
+	for _, p in ipairs(points) do
+		orig.setPoint(region, p[1], p[2], p[3], p[4], p[5]);
+	end
+end
+
+-- Only a counter the player placed gets anchored; an unplaced one must keep
+-- behaving exactly like stock (including every later Blizzard re-anchor).
+local function MoveFPS_ApplyPosition()
+	if not db.placed then
+		return;
+	end
+	if MoveFPS_frame then
+		MoveFPS_ApplyAnchor(MoveFPS_frame, db.anchor, UIParent, "CENTER", db.x, db.y);
 	else
-		for _, region in ipairs(MoveFPS_regions) do
-			local points = MoveFPS_orig[region].points;
-			if points then
-				MoveFPS_ApplyAnchor(region, points.point, points.relativeTo, points.relativePoint, points.x, points.y);
-			end
+		MoveFPS_ApplyAnchor(MoveFPS_label, db.anchor, UIParent, "CENTER", db.x, db.y);
+		MoveFPS_ApplyAnchor(MoveFPS_text, "LEFT", MoveFPS_label, "RIGHT", 0, 0);
+	end
+end
+
+-- Hands the counter's anchors back to the game. Used by /movefps reset (only
+-- when the player had placed it) and once at load on classic, where the
+-- strata carrier reparent must leave the stock counter exactly where the game
+-- put it. Never called afterwards on an unplaced counter, so Blizzard's own
+-- re-anchoring keeps applying while the counter has never been moved.
+local function MoveFPS_RestoreStockAnchors()
+	for _, region in ipairs(MoveFPS_regions) do
+		local points = MoveFPS_orig[region].points;
+		if points and #points > 0 then
+			MoveFPS_RestorePoints(region, points);
 		end
 	end
 end
@@ -419,31 +452,6 @@ local function MoveFPS_RectAnchorPoint(region)
 		(top + bottom) / 2 + delta[2] * (top - bottom) / 2;
 end
 
--- The point(s) a region has right now. A measure can run after the client's
--- own login layout, when Blizzard may already have re-anchored the counter
--- (the micro menu does), so it restores THIS snapshot rather than the anchors
--- captured at ADDON_LOADED -- an unplaced counter must keep behaving exactly
--- like stock.
-local function MoveFPS_CurrentPoints(region)
-	local points = {};
-	local count = region.GetNumPoints and region:GetNumPoints() or 1;
-	for i = 1, count do
-		local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, i);
-		if ok and point then
-			points[#points + 1] = { point, relativeTo, relativePoint, x, y };
-		end
-	end
-	return points;
-end
-
-local function MoveFPS_RestorePoints(region, points)
-	local orig = MoveFPS_orig[region];
-	orig.clear(region);
-	for _, p in ipairs(points) do
-		orig.setPoint(region, p[1], p[2], p[3], p[4], p[5]);
-	end
-end
-
 -- The counter's anchor point in stored units: the SetPoint offset from
 -- UIParent's center that would put it exactly where it sits now. The counter
 -- lives on WorldFrame on every flavor (scale 1, outside UIParent), so its
@@ -607,10 +615,16 @@ local function MoveFPS_SetAnchor(anchor)
 		local w, h = region:GetWidth(), region:GetHeight();
 		if w and h then
 			local dx, dy = (new[1] - old[1]) * w / 2, (new[2] - old[2]) * h / 2;
-			db.x, db.y = MoveFPS_Round2(db.x + dx), MoveFPS_Round2(db.y + dy);
+			local wasX, wasY = db.x, db.y;
+			-- a switch at the coordinate limit must not store a spot the
+			-- loader would treat as damaged: stay inside the range the
+			-- input boxes accept
+			db.x = math.max(-MAX_COORD, math.min(MAX_COORD, MoveFPS_Round2(db.x + dx)));
+			db.y = math.max(-MAX_COORD, math.min(MAX_COORD, MoveFPS_Round2(db.y + dy)));
 			if MoveFPS_dragActive then
-				-- the grab is relative to the anchor point: shift it along
-				MoveFPS_grabDX, MoveFPS_grabDY = MoveFPS_grabDX - dx, MoveFPS_grabDY - dy;
+				-- the grab is relative to the anchor point: shift it along by
+				-- the distance the anchor point actually moved
+				MoveFPS_grabDX, MoveFPS_grabDY = MoveFPS_grabDX - (db.x - wasX), MoveFPS_grabDY - (db.y - wasY);
 			end
 		end
 		MoveFPS_ApplyPosition();
@@ -671,6 +685,9 @@ local function MoveFPS_BuildDragProxy()
 	if dragProxy then
 		return;
 	end
+	if not (MoveFPS_frame or MoveFPS_label) then
+		return; -- unknown client layout: the counter is inert, nothing to drag
+	end
 	-- The green move-mode square must render BELOW the counter's text while
 	-- still receiving the drag, so it is a BACKGROUND-layer texture inside
 	-- the counter's own frame hierarchy (a frame's background layer draws
@@ -678,8 +695,10 @@ local function MoveFPS_BuildDragProxy()
 	-- transparent frame stacked above the text: the text stays readable while
 	-- the invisible frame catches the mouse. Both hug the counter's exact
 	-- visual rectangle (label + number) through relative anchors, so they
-	-- follow every counter move and size change on their own.
-	local parent = MoveFPS_frame or WorldFrame;
+	-- follow every counter move and size change on their own. On classic the
+	-- carrier is that hierarchy: sharing it also makes the overlay follow the
+	-- elevated strata the picker sets.
+	local parent = MoveFPS_strataCarrier or MoveFPS_frame or WorldFrame;
 	local square = parent:CreateTexture(nil, "BACKGROUND");
 	square:SetColorTexture(0, 1, 0, 0.5);
 	dragProxy = CreateFrame("Frame", "Move_FPS_CounterDragProxy", parent);
@@ -883,7 +902,9 @@ local function MoveFPS_BuildOptionsWindow()
 	options.moveBtn:SetPoint("TOP", options, "TOP", 0, -6);
 	options.moveBtn:SetScript("OnClick", function()
 		MoveFPS_BuildDragProxy();
-		MoveFPS_SetMoveMode(not dragProxy:IsShown());
+		if dragProxy then
+			MoveFPS_SetMoveMode(not dragProxy:IsShown());
+		end
 	end);
 
 	-- position: x/y coordinates with two decimal places, side by side; the
@@ -1024,8 +1045,11 @@ end
 -- the anchor picker needs the menu system; load it lazily where it is not
 -- loaded yet, and fall back to a cycling button where it does not exist
 local function MoveFPS_EnsureMenuUtil()
-	if not MenuUtil and LoadAddOn then
-		pcall(LoadAddOn, "Blizzard_Menu");
+	if not MenuUtil then
+		local loadAddOn = C_AddOns and C_AddOns.LoadAddOn;
+		if loadAddOn then
+			pcall(loadAddOn, "Blizzard_Menu");
+		end
 	end
 end
 
@@ -1117,8 +1141,15 @@ local function MoveFPS_LoadState()
 	if MoveFPS_stateLoaded then
 		return true;
 	end
+	local classic = false;
 	if FramerateFrame then
-		-- modern clients: one frame holds both fontstrings
+		-- modern clients: one frame holds both fontstrings and exposes Toggle.
+		-- The same Blizzard addon also ships a classic variant without either
+		-- child or method, so a FramerateFrame of another shape is an unknown
+		-- layout: stay inert instead of calling what it does not have.
+		if not (FramerateFrame.Label and FramerateFrame.FramerateText and FramerateFrame.Toggle) then
+			return false;
+		end
 		MoveFPS_frame = FramerateFrame;
 		MoveFPS_text = FramerateFrame.FramerateText;
 		MoveFPS_label = FramerateFrame.Label;
@@ -1129,17 +1160,14 @@ local function MoveFPS_LoadState()
 		-- strata, and WorldFrame's own strata must stay untouched (it renders
 		-- the world), so a carrier frame -- still a child of the unscaled
 		-- WorldFrame, so the coordinate space does not change -- holds the pair
-		-- and carries their strata.
+		-- and carries their strata (created below, after the stock anchors are
+		-- snapshotted).
+		classic = true;
 		MoveFPS_label = FramerateLabel;
 		MoveFPS_text = FramerateText;
 		MoveFPS_regions[1] = FramerateLabel;
 		MoveFPS_regions[2] = FramerateText;
 		MoveFPS_toggle = function() ToggleFramerate(); end;
-		if WorldFrame then -- always present on these clients; nil-guard for the mock contract
-			MoveFPS_strataCarrier = CreateFrame("Frame", nil, WorldFrame);
-			MoveFPS_label:SetParent(MoveFPS_strataCarrier);
-			MoveFPS_text:SetParent(MoveFPS_strataCarrier);
-		end
 	else
 		return false;
 	end
@@ -1167,16 +1195,24 @@ local function MoveFPS_LoadState()
 	end
 
 	for _, region in ipairs(MoveFPS_regions) do
-		local orig = {
+		MoveFPS_orig[region] = {
 			clear = region.ClearAllPoints,
 			setPoint = region.SetPoint,
+			points = MoveFPS_CurrentPoints(region), -- the game's own full anchor set
 		};
-		local ok, point, relativeTo, relativePoint, x, y = pcall(region.GetPoint, region, 1);
-		if ok and point then
-			orig.points = { point = point, relativeTo = relativeTo, relativePoint = relativePoint, x = x, y = y };
-		end
-		MoveFPS_orig[region] = orig;
 	end
+
+	-- Classic: give the two stock fontstrings a frame that can carry a strata.
+	-- The pair is reparented only AFTER its anchors are snapshotted, so the
+	-- stock restore is the game's layout whatever SetParent does with
+	-- inherited anchors; still a child of the unscaled WorldFrame, so the
+	-- coordinate space does not change.
+	if classic and WorldFrame then
+		MoveFPS_strataCarrier = CreateFrame("Frame", nil, WorldFrame);
+		MoveFPS_label:SetParent(MoveFPS_strataCarrier);
+		MoveFPS_text:SetParent(MoveFPS_strataCarrier);
+	end
+
 	local sizeSource = MoveFPS_label or MoveFPS_text;
 	if sizeSource and sizeSource.GetFont then
 		local _, fontSize = sizeSource:GetFont();
@@ -1237,7 +1273,13 @@ local function MoveFPS_EnsureInit()
 	end
 	if not MoveFPS_initDone then
 		MoveFPS_initDone = true;
-		MoveFPS_ApplyPosition();
+		if db.placed then
+			MoveFPS_ApplyPosition();
+		elseif MoveFPS_strataCarrier then
+			-- the classic reparent above must not move a counter the player
+			-- never placed; this is its ONLY stock restore while unplaced
+			MoveFPS_RestoreStockAnchors();
+		end
 		MoveFPS_StartGuard();
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
@@ -1262,7 +1304,7 @@ local function MoveFPS_EnsureInit()
 			hooksecurefunc("ToggleFramerate", MoveFPS_OnToggled);
 		end
 	else
-		MoveFPS_ApplyPosition();
+		MoveFPS_ApplyPosition(); -- placed-only: an unplaced counter stays stock
 		MoveFPS_StartGuard();
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
@@ -1306,12 +1348,17 @@ SlashCmdList.MOVEFPS = function(msg)
 		-- the restored defaults from the cursor on its very next frame
 		MoveFPS_EndDrag();
 		MoveFPS_StopGuard();
+		local wasPlaced = db.placed;
 		for k in pairs(db) do db[k] = nil; end -- wipe in place: db aliases stay valid
 		MergeDefaults(db, defaults);
 		db.size = gameDefaultSize;
 		db.strata = stockStrataIndex;
-		-- hand the anchors back first, then measure the game's own spot
-		MoveFPS_ApplyPosition();
+		-- hand the anchors back first (only if we took them), then measure
+		-- the game's own spot; an unplaced counter already sits where the
+		-- game put it, including any later Blizzard re-anchor
+		if wasPlaced then
+			MoveFPS_RestoreStockAnchors();
+		end
 		MoveFPS_ApplySize();
 		MoveFPS_ApplyStrata();
 		MoveFPS_Relayout(); -- size changes only lay out on the next OnUpdate
